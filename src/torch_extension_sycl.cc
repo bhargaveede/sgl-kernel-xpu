@@ -93,6 +93,30 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "    bool?    pack_gqa,"
       "    int      sm_margin) -> Tensor[]");
   m.impl("fwd", torch::kXPU, make_pytorch_shim(&mha_fwd));
+  m.def(
+      "trtllm_ragged_attention_deepseek("
+      "Tensor query, "
+      "Tensor key, "
+      "Tensor value, "
+      "Tensor workspace_buffer, "
+      "Tensor seq_lens, "
+      "int max_q_len, "
+      "int max_kv_len, "
+      "float bmm1_scale, "
+      "float bmm2_scale, "
+      "float o_sf_scale, "
+      "int batch_size, "
+      "int window_left, "
+      "Tensor cum_seq_lens_q, "
+      "Tensor cum_seq_lens_kv, "
+      "bool enable_pdl, "
+      "bool is_causal, "
+      "bool return_lse, "
+      "Tensor? attention_sinks=None, "
+      "Tensor? out=None, "
+      "Tensor? lse=None"
+      ") -> Tensor[]");
+    m.impl("trtllm_ragged_attention_deepseek",, torch::kXPU, &trtllm_ragged_attention_deepseek_impl);
 }
 
 REGISTER_EXTENSION(common_ops)

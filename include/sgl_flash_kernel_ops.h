@@ -72,3 +72,26 @@ std::vector<at::Tensor> mha_fwd(
     int num_splits,
     std::optional<bool> pack_gqa_,
     int const sm_margin);
+
+
+std::vector<at::Tensor> trtllm_ragged_attention_deepseek_impl(
+    at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& workspace_buffer,
+    const at::Tensor& seq_lens,
+    int max_q_len,
+    int max_kv_len,
+    float bmm1_scale,
+    float bmm2_scale,
+    float o_sf_scale,
+    int batch_size,
+    int window_left,
+    const at::Tensor& cum_seq_lens_q,
+    const at::Tensor& cum_seq_lens_kv,
+    bool enable_pdl,
+    bool is_causal,
+    bool return_lse,
+    std::optional<const at::Tensor> attention_sinks = {},
+    std::optional<at::Tensor> out = {},
+    std::optional<at::Tensor> lse = {});

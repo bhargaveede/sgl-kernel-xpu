@@ -238,7 +238,6 @@ class FMHASplitKV {
     CUTE_STATIC_ASSERT(is_static<TileShapeQK>::value);
     CUTE_STATIC_ASSERT(is_static<TileShapePV>::value);
     // Separate out problem shape for convenience
-
     // "ProblemShape{} should be <batch, num_heads_q, num_heads_kv, seq_len_qo,
     // seq_len_kv, head_size_qk, head_size_vo>");
     auto batch = get<0>(params.problem_shape);

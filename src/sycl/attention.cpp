@@ -856,3 +856,110 @@ std::vector<at::Tensor> mha_fwd(
   }
   return {out, softmax_lse, out_accum, softmax_lse_accum};
 }
+
+
+std::vector<at::Tensor> trtllm_ragged_attention_deepseek_impl(
+    at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& workspace_buffer,
+    const at::Tensor& seq_lens,
+    int max_q_len,
+    int max_kv_len,
+    float bmm1_scale,
+    float bmm2_scale,
+    float o_sf_scale,
+    int batch_size,
+    int window_left,
+    const at::Tensor& cum_seq_lens_q,
+    const at::Tensor& cum_seq_lens_kv,
+    bool enable_pdl,
+    bool is_causal,
+    bool return_lse,
+    std::optional<const at::Tensor> attention_sinks = {},
+    std::optional<at::Tensor> out = {},
+    std::optional<at::Tensor> lse = {}
+) {
+    // Prepare parameters for FA3 mha_fwd
+    std::optional<const at::Tensor> q_v_ = return_lse ? lse : std::nullopt;
+    std::optional<const at::Tensor> kv_batch_idx_ = std::nullopt;  // Not used
+    std::optional<const at::Tensor> leftpad_k_ = std::nullopt;
+    std::optional<const at::Tensor> rotary_cos_ = std::nullopt;
+    std::optional<const at::Tensor> rotary_sin_ = std::nullopt;
+    std::optional<const at::Tensor> seqlens_rotary_ = std::nullopt;
+    std::optional<at::Tensor> q_descale_ = std::nullopt;  // For FP8
+    std::optional<at::Tensor> k_descale_ = std::nullopt;
+    std::optional<at::Tensor> v_descale_ = std::nullopt;
+    std::optional<const at::Tensor> softmax_sink_ = attention_sinks;
+    std::optional<at::Tensor> scheduler_metadata_ = std::nullopt;
+    
+    // Handle scaling - FA3 uses single softmax_scale
+    // You may need to pre-scale query by bmm1_scale and post-scale output
+    float softmax_scale = bmm1_scale;
+    
+    // Configure attention pattern
+    int window_size_left = window_left;
+    int window_size_right = -1;  // No right window
+    float softcap = 0.0f;  // No softcap
+    bool is_rotary_interleaved = false;
+    
+    // Determine num_splits based on workspace_buffer size if needed
+    int num_splits = 0;  // Auto-determine
+    std::optional<bool> pack_gqa_ = std::nullopt;
+    int sm_margin = 0;
+    
+    auto page_table = at::arange(0, batch_size, query.options().dtype(at::kInt))
+                  .reshape({batch_size, 1})
+                  .contiguous();
+    
+    // Call FA3 kernel
+    auto results = mha_fwd(
+        query,
+        key,
+        value,
+        q_v_,
+        cum_seq_lens_q,
+        cum_seq_lens_kv,
+        max_q_len,
+        page_table,
+        kv_batch_idx_,
+        leftpad_k_,
+        rotary_cos_,
+        rotary_sin_,
+        seqlens_rotary_,
+        q_descale_,
+        k_descale_,
+        v_descale_,
+        softmax_scale,
+        softmax_sink_,
+        is_causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        is_rotary_interleaved,
+        scheduler_metadata_,
+        num_splits,
+        pack_gqa_,
+        sm_margin
+    );
+    
+    // Post-process output with bmm2_scale and o_sf_scale if needed
+    at::Tensor output = results[0];
+    if (bmm2_scale != 1.0f || o_sf_scale != 1.0f) {
+        output = output * (bmm2_scale * o_sf_scale);
+    }
+    
+    // Handle output and LSE
+    if (out.has_value()) {
+        out.value().copy_(output);
+    }
+    
+    if (return_lse && results.size() > 1) {
+        if (lse.has_value()) {
+            lse.value().copy_(results[1]);  // LSE is second return value
+        }
+        return {output, results[1]};
+    }
+    
+    return {output};
+}
