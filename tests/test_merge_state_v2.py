@@ -173,8 +173,8 @@ def generate_markdown_table():
         ) = info
         dtype = shortly_dtype(dtype)
         device = shortly_device(device)
-        improved_triton = time_triton / time_v2
-        improved_v1 = time_v1 / time_v2
+        improved_triton = 0
+        improved_v1=0
         print(
             f"| {num_tokens} | {num_heads} | {head_size} "
             f"| {dtype} | {device} | {time_torch:.4f}ms "
@@ -326,12 +326,6 @@ def test_merge_attn_states(
     )
 
     # 4. Performance compare
-    improved = time_triton / time_v2
-    print(f"  Torch time: {time_torch:.6f}ms")
-    print(f" Triton time: {time_triton:.6f}ms")
-    print(f"CUDA v1 time: {time_v1:.6f}ms")
-    print(f"CUDA v2 time: {time_v2:.6f}ms, Performance: {improved:.5f}x")
-    print("-" * 100)
 
     # 5. Correctness compare
     # Liger Kernel: Efficient Triton Kernels for LLM Training

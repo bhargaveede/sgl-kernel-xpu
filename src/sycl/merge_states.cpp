@@ -7,11 +7,28 @@
 #include <torch/all.h>
 #include "Utils.h"
 
+inline float to_float(float u) {
+	    return u;
+}
 
-template <typename scalar_t>
-float to_float(scalar_t x); // You must provide
-template <typename scalar_t>
-void from_float(scalar_t &dst, float x); // You must provide
+inline float to_float(sycl::half u) {
+	    return static_cast<float>(u);
+}
+
+inline float to_float(sycl::ext::oneapi::bfloat16 u) {
+	    return static_cast<float>(u); // SYCL BF16 -> float conversion built-in
+					  }
+inline void from_float(float &d, float s) {
+	    d = s;
+}
+
+inline void from_float(sycl::half &d, float s) {
+	    d = static_cast<sycl::half>(s);
+}
+
+inline void from_float(sycl::ext::oneapi::bfloat16 &d, float s) {
+	    d = static_cast<sycl::ext::oneapi::bfloat16>(s);
+}
 template <typename scalar_t, typename pack_128b_t>
 struct MergePrefixSuffix {
     // 1. Members to store captured variables
@@ -147,21 +164,6 @@ void merge_attn_states_sycl(
         ((total_threads + local_size - 1) / local_size) * local_size;
     auto stream = at::xpu::getCurrentXPUStream();
     auto q = stream.queue();
-            RotaryEmbeddingBatched<scalar_t, EmbeddingAlgorithm::RotateHalf, false> kernel = {
-                .positions_ = positions.data_ptr<int64_t>(),
-                .cos_sin_cache_ = cos_sin_cache.data_ptr<scalar_t>(),
-                .cos_sin_cache_offsets_ = nullptr,
-                .query_ = query.data_ptr<scalar_t>(),
-                .key_ = key.data_ptr<scalar_t>(),
-                .num_heads_ = num_heads,
-                .num_kv_heads_ = num_kv_heads,
-                .query_stride_ = query_stride,
-                .key_stride_ = key_stride,
-                .head_size_ = head_size,
-                .rot_dim_ = rot_dim,
-            };
-            cgh.parallel_for<decltype(kernel)>(
-                sycl::nd_range<1>(sycl::range<1>(num_groups * group_size), sycl::range<1>(group_size)), kernel);
     q.submit([&](sycl::handler &h) {
         MergePrefixSuffix<scalar_t, pack_128b_t> kernel_functor(
                 total_threads,
