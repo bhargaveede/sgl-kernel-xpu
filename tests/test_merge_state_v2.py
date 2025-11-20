@@ -194,11 +194,7 @@ def generate_markdown_table():
 def test_merge_attn_states(
     num_tokens: int, num_query_heads: int, head_size: int, output_dtype: torch.dtype
 ):
-    if not torch.cuda.is_available():
-        pytest.skip(
-            "Currently only support compare triton merge_attn_states "
-            "with custom cuda merge_attn_states kernel"
-        )
+
 
     NUM_TOKENS = num_tokens
     NUM_HEADS = num_query_heads
@@ -211,8 +207,8 @@ def test_merge_attn_states(
     )
 
     # prefix_lse and suffix_lse contain inf and normal values
-    prefix_lse = torch.randn(NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device="cuda")
-    suffix_lse = torch.randn(NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device="cuda")
+    prefix_lse = torch.randn(NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device="xpu")
+    suffix_lse = torch.randn(NUM_TOKENS, NUM_HEADS, dtype=torch.float32, device="xpu")
 
     # Generate boolean masks
     mask_prefix = torch.rand(NUM_TOKENS, NUM_HEADS) < 0.1
@@ -228,16 +224,16 @@ def test_merge_attn_states(
     # Other input tensors (need to be initialized but
     # no actual calculation needed)
     output = torch.zeros(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="xpu"
     )
     output_lse = torch.zeros(
-        (NUM_TOKENS, NUM_HEADS), dtype=torch.float32, device="cuda"
+        (NUM_TOKENS, NUM_HEADS), dtype=torch.float32, device="xpu"
     )
     prefix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="xpu"
     )
     suffix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="cuda"
+        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="xpu"
     )
 
     warmup_times = 2
@@ -319,7 +315,7 @@ def test_merge_attn_states(
     output_v1 = output.clone()
     output_lse_v1 = output_lse.clone()
     time_v1, output_v1, output_lse_v1 = perf_kernel_fn(
-        output_v1, output_lse_v1, merge_state, fn_type="cuda_v1"
+        output_v1, output_lse_v1, merge_state_v2, fn_type="cuda_v2"
     )
 
     # 3. Run the merge_state V2 kernel
