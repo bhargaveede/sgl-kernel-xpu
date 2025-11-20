@@ -203,7 +203,7 @@ def test_merge_attn_states(
     print(
         f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
         f"HEAD_SIZE:{HEAD_SIZE}, DTYPE: {output_dtype}, "
-        f"Device: {torch.cuda.get_device_name()}"
+        # f"Device: {torch.cuda.get_device_name()}"
     )
 
     # prefix_lse and suffix_lse contain inf and normal values
@@ -260,8 +260,8 @@ def test_merge_attn_states(
                 return 0, output_fn, output_lse_fn
 
         total_time = 0
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
+        # start = torch.cuda.Event(enable_timing=True)
+        # end = torch.cuda.Event(enable_timing=True)
 
         try:
             for _ in range(warmup_times):
@@ -273,7 +273,7 @@ def test_merge_attn_states(
                     output_fn,
                     output_lse_fn,
                 )
-            torch.cuda.synchronize()
+            torch.xpu.synchronize()
 
             for _ in range(repeat_times):
                 start.record()
@@ -286,7 +286,7 @@ def test_merge_attn_states(
                     output_lse_fn,
                 )
                 end.record()
-                torch.cuda.synchronize()
+                torch.xpu.synchronize()
                 total_time += start.elapsed_time(end)
 
             avg_time = total_time / repeat_times
@@ -372,7 +372,7 @@ def test_merge_attn_states(
     )
     print("-" * 100)
 
-    device = torch.cuda.get_device_name()
+    device = torch.xpu.get_device_name()
     all_case_info.append(
         (
             NUM_TOKENS,
