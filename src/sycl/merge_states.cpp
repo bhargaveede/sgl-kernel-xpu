@@ -92,8 +92,8 @@ struct MergePrefixSuffix {
         float p_lse = prefix_lse[token_idx * num_heads + head_idx];
         float s_lse = suffix_lse[token_idx * num_heads + head_idx];
 
-        p_lse = sycl::isfinite(p_lse) ? p_lse : -std::numeric_limits::infinity();
-        s_lse = sycl::isfinite(s_lse) ? s_lse : -std::numeric_limits::infinity();
+        p_lse = sycl::isfinite(p_lse) ? p_lse : -std::numeric_limits<float>::infinity();
+        s_lse = sycl::isfinite(s_lse) ? s_lse : -std::numeric_limits<float>::infinity();
 
         const float max_lse = sycl::fmax(p_lse, s_lse);
         p_lse -= max_lse;
@@ -101,28 +101,25 @@ struct MergePrefixSuffix {
 
         const float p_se = sycl::exp(p_lse);
         const float s_se = sycl::exp(s_lse);
-        const float out_se = sycl::fmax(p_se + s_se, std::numeric_limits::min());
+        const float out_se = sycl::fmax(p_se + s_se, std::numeric_limits<float>::min());
         const float p_scale = p_se / out_se;
         const float s_scale = s_se / out_se;
 
         if (pack_offset < head_size) {
-            auto p_pack_ptr = sycl::bit_cast<const pack_128b_t*>(prefix_head_ptr);
-            auto s_pack_ptr = sycl::bit_cast<const pack_128b_t*>(suffix_head_ptr);
-            auto o_pack_ptr = sycl::bit_cast<pack_128b_t*>(output_head_ptr);
-
-            pack_128b_t p_out_pack = p_pack_ptr[pack_offset / pack_size];
-            pack_128b_t s_out_pack = s_pack_ptr[pack_offset / pack_size];
+            pack_128b_t p_out_pack;
+            pack_128b_t s_out_pack;
             pack_128b_t o_out_pack;
+            sycl::memcpy(&p_out_pack, prefix_head_ptr + pack_offset, sizeof(pack_128b_t));
+            sycl::memcpy(&s_out_pack, suffix_head_ptr + pack_offset, sizeof(pack_128b_t));
 
             #pragma unroll
             for (uint32_t i = 0; i < pack_size; ++i) {
                 const float pf = to_float(p_out_pack[i]);
                 const float sf = to_float(s_out_pack[i]);
                 const float of = pf * p_scale + sf * s_scale;
-                from_float(o_out_pack[i], of);
+                o_out_pack[i] = static_cast<scalar_t>(of);
             }
-
-            o_pack_ptr[pack_offset / pack_size] = o_out_pack;
+            memcpy(output_head_ptr + pack_offset, &o_out_pack, sizeof(pack_128b_t));
         }
 
         if (output_lse != nullptr && pack_idx == 0) {
