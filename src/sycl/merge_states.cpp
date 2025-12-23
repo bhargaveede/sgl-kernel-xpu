@@ -104,22 +104,26 @@ struct MergePrefixSuffix {
         const float out_se = sycl::fmax(p_se + s_se, std::numeric_limits<float>::min());
         const float p_scale = p_se / out_se;
         const float s_scale = s_se / out_se;
+        using vec_t = sycl::vec<scalar_t, sizeof(pack_128b_t) / sizeof(scalar_t)>;
 
         if (pack_offset < head_size) {
-            pack_128b_t p_out_pack;
-            pack_128b_t s_out_pack;
-            pack_128b_t o_out_pack;
-            memcpy(&p_out_pack, prefix_head_ptr + pack_offset, sizeof(pack_128b_t));
-            memcpy(&s_out_pack, suffix_head_ptr + pack_offset, sizeof(pack_128b_t));
+                vec_t p_vec;
+                vec_t s_vec;
 
-            #pragma unroll
-            for (uint32_t i = 0; i < pack_size; ++i) {
-                const float pf = to_float(p_out_pack[i]);
-                const float sf = to_float(s_out_pack[i]);
-                const float of = pf * p_scale + sf * s_scale;
-                o_out_pack[i] = static_cast<scalar_t>(of);
-            }
-            memcpy(output_head_ptr + pack_offset, &o_out_pack, sizeof(pack_128b_t));
+                memcpy(&p_vec, prefix_head_ptr + pack_offset, sizeof(vec_t));
+                memcpy(&s_vec, suffix_head_ptr + pack_offset, sizeof(vec_t));
+
+                vec_t o_vec;
+
+                #pragma unroll
+                for (uint32_t i = 0; i < pack_size; ++i) {
+                    float pf = to_float(p_vec[i]);
+                    float sf = to_float(s_vec[i]);
+                    float of = pf * p_scale + sf * s_scale;
+                    from_float(o_vec[i], of);
+                }
+
+                memcpy(output_head_ptr + pack_offset, &o_vec, sizeof(vec_t));
         }
 
         if (output_lse != nullptr && pack_idx == 0) {
