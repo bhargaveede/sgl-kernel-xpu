@@ -109,8 +109,8 @@ struct MergePrefixSuffix {
             pack_128b_t p_out_pack;
             pack_128b_t s_out_pack;
             pack_128b_t o_out_pack;
-            sycl::memcpy(&p_out_pack, prefix_head_ptr + pack_offset, sizeof(pack_128b_t));
-            sycl::memcpy(&s_out_pack, suffix_head_ptr + pack_offset, sizeof(pack_128b_t));
+            memcpy(&p_out_pack, prefix_head_ptr + pack_offset, sizeof(pack_128b_t));
+            memcpy(&s_out_pack, suffix_head_ptr + pack_offset, sizeof(pack_128b_t));
 
             #pragma unroll
             for (uint32_t i = 0; i < pack_size; ++i) {
