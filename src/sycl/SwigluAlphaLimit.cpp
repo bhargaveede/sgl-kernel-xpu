@@ -115,15 +115,28 @@ void swiglu_with_alpha_and_limit_sycl(
     float limit) {
   const size_t pairs = batch * hidden;  // gate/up pairs
   const size_t vec_pairs = pairs / 4;
+  const size_t remainder_start = vec_pairs * 4;
+  const size_t remainder = pairs - remainder_start;
 
   const size_t local = 256;
   const size_t global = ((vec_pairs + local - 1) / local) * local;
   auto stream = at::xpu::getCurrentXPUStream();
   auto q = stream.queue();
-  q.submit([&](sycl::handler& h) {
-    SwigluVec4Kernel<scalar_t> kernel_functor(x, y, pairs, alpha, limit);
-    h.parallel_for(sycl::nd_range<1>(global, local), kernel_functor);
-  });
+  if (vec_pairs > 0) {
+    const size_t global = ((vec_pairs + local - 1) / local) * local;
+    q.submit([&](sycl::handler& h) {
+      SwigluVec4Kernel<scalar_t> kernel_functor(x, y, pairs, alpha, limit);  // Pass pairs, not vec_pairs
+      h.parallel_for(sycl::nd_range<1>(global, local), kernel_functor);
+    });
+  }
+  if (remainder > 0) {
+    const size_t global_rem = ((remainder + local - 1) / local) * local;
+    q.submit([&](sycl::handler& h) {
+      SwigluScalarKernel<scalar_t> kernel_functor(
+          x + 2 * remainder_start, y + remainder_start, remainder, alpha, limit);
+      h.parallel_for(sycl::nd_range<1>(global_rem, local), kernel_functor);
+    });
+  }
 }
 
 #define SYCL_DISPATCH_BY_SCALAR_DTYPE(scalar_dtype, fn)                    \

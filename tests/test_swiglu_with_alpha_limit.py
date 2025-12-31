@@ -29,7 +29,7 @@ def test_swiglu_with_alpha_and_limit(batch_size, hidden_size, alpha, limit):
     # Ensure hidden_size is even for gate/up split
     if hidden_size % 2 != 0:
         pytest.skip("hidden_size must be even")
-    
+
     x = torch.randn((batch_size, hidden_size), dtype=torch.float32, device="xpu")
 
     # Call the kernel
