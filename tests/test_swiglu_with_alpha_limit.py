@@ -6,16 +6,12 @@ import torch
 from sgl_kernel import swiglu_with_alpha_and_limit
 
 
-def swiglu_with_alpha_and_limit_ref(x, w, alpha, limit):
+def swiglu_with_alpha_and_limit_ref(x, gemm1_alpha, gemm1_limit):
     """Reference implementation using native PyTorch"""
-    # SwiGLU: x * silu(w) where silu(x) = x * sigmoid(x)
-    # With alpha scaling and limit clamping
-    sigmoid_w = torch.sigmoid(w)
-    silu_w = w * sigmoid_w
-    result = x * silu_w
-    result = alpha * result
-    result = torch.clamp(result, -limit, limit)
-    return result
+    gate, up = x[..., ::2], x[..., 1::2]
+    gate = gate.clamp(min=None, max=gemm1_limit)
+    up = up.clamp(min=-gemm1_limit, max=gemm1_limit)
+    return gate * torch.sigmoid(gate * gemm1_alpha) * (up + 1)
 
 
 @pytest.mark.parametrize(
@@ -23,21 +19,24 @@ def swiglu_with_alpha_and_limit_ref(x, w, alpha, limit):
     list(
         itertools.product(
             [1, 16, 128, 512, 1024],  # batch_size
-            [64, 128, 256, 512, 1024, 2048, 4096],  # hidden_size
+            [64, 128, 256, 512, 1024, 2048, 4096],  # hidden_size (must be even)
             [0.5, 1.0, 2.0],  # alpha
             [1.0, 5.0, 10.0],  # limit
         )
     ),
 )
 def test_swiglu_with_alpha_and_limit(batch_size, hidden_size, alpha, limit):
+    # Ensure hidden_size is even for gate/up split
+    if hidden_size % 2 != 0:
+        pytest.skip("hidden_size must be even")
+    
     x = torch.randn((batch_size, hidden_size), dtype=torch.float32, device="xpu")
-    w = torch.randn((batch_size, hidden_size), dtype=torch.float32, device="xpu")
 
     # Call the kernel
-    output = swiglu_with_alpha_and_limit(x, w, alpha, limit)
+    output = swiglu_with_alpha_and_limit(x, alpha, limit)
 
     # Reference implementation
-    output_ref = swiglu_with_alpha_and_limit_ref(x, w, alpha, limit)
+    output_ref = swiglu_with_alpha_and_limit_ref(x, alpha, limit)
 
     # Verify the outputs match
     assert torch.allclose(
