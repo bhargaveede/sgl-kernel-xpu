@@ -68,7 +68,7 @@ struct SwigluVec4Kernel {
     const std::int64_t vec_idx = it.get_global_linear_id();
     const std::int64_t base = vec_idx * 4;
 
-    if (base + 3 >= total_pairs) return;
+    if (base >= total_pairs) return;
 
     // ---- load 4 gate values ----
     sycl::vec<float, 4> gate_v;
@@ -121,7 +121,7 @@ void swiglu_with_alpha_and_limit_sycl(
   auto stream = at::xpu::getCurrentXPUStream();
   auto q = stream.queue();
   q.submit([&](sycl::handler& h) {
-    SwigluVec4Kernel<scalar_t> kernel_functor(x, y, vec_pairs, alpha, limit);
+    SwigluVec4Kernel<scalar_t> kernel_functor(x, y, pairs, alpha, limit);
     h.parallel_for(sycl::nd_range<1>(global, local), kernel_functor);
   });
 }
