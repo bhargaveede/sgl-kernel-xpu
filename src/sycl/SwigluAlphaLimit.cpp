@@ -146,7 +146,7 @@ void swiglu_with_alpha_and_limit_sycl(
         SwigluVec4Kernel<scalar_t> kernel_functor(
             x,
             y,
-            total_pairs,
+            vec_pairs,
             alpha,
             limit);
         h.parallel_for(
