@@ -1,127 +1,179 @@
 import itertools
 import pandas as pd
 import torch
-import time
-
-# Replace with the correct import if needed
+import triton
+import triton.testing
 from sgl_kernel import swiglu_with_alpha_and_limit
 
-def sglang_swiglu_with_alpha_and_limit(x: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
-    return swiglu_with_alpha_and_limit(x, alpha, limit)
-
-def reference_swiglu(x: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
+def reference_swiglu_with_alpha_and_limit(x, alpha, limit):
+    # x [B, 2H]
     a, b = torch.chunk(x, 2, dim=-1)
     swiglu = a * torch.sigmoid(b)
     swiglu = alpha * swiglu
     swiglu = torch.clamp(swiglu, -limit, limit)
     return swiglu
 
-def calculate_bandwidth_flops(batch_size, hidden_dim, time_ms):
-    # x: [B, 2H], float32 (4 bytes each)
-    num_elements = batch_size * hidden_dim * 2         # input
-    input_bytes = num_elements * 4
-    output_bytes = batch_size * hidden_dim * 4         # output [B, H], float32
+def sglang_swiglu_with_alpha_and_limit(x, alpha, limit):
+    # x [B, 2H]
+    return swiglu_with_alpha_and_limit(x, alpha, limit)
+
+def calculate_diff(batch_size, hidden_dim, alpha, limit, dtype):
+    device = torch.device("xpu")
+    x = torch.randn(batch_size, hidden_dim * 2, device=device, dtype=dtype)
+    torch_out = reference_swiglu_with_alpha_and_limit(x, alpha, limit)
+    sglang_out = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
+    output_diff = torch.abs(torch_out - sglang_out).mean().item()
+    cos_sim = torch.nn.functional.cosine_similarity(
+        torch_out.reshape(-1), sglang_out.reshape(-1), dim=0
+    ).item()
+
+    print(f"Mean absolute difference: {output_diff:.6f}")
+    print(f"Cosine similarity: {cos_sim:.6f}")
+
+    if cos_sim > 0.99:
+        print(f"✅ kernel and reference match for alpha={alpha}, limit={limit}")
+    else:
+        print(f"❌ kernel and reference differ for alpha={alpha}, limit={limit}")
+
+batch_size_range = [1, 4, 8, 16, 32]
+hidden_dim_range = [512, 1024, 2048, 4096]
+alpha_range = [0.25, 1.0, 2.0]
+limit_range = [1.0, 6.0, 12.0]
+
+# (batch_size, hidden_dim, alpha, limit)
+configs = list(itertools.product(batch_size_range, hidden_dim_range, [1.0], [6.0]))
+all_results = []
+
+def calculate_flops(batch_size, hidden_dim):
+    """
+    Estimate FLOPs for Swiglu with alpha and limit:
+    For each output element: 1 sigmoid + 1 mul + 1 alpha scale + 1 clamp + 1 split = 5 ops
+    Total: batch_size * hidden_dim * 5
+    """
+    return batch_size * hidden_dim * 5
+
+def calculate_effective_bandwidth(
+    batch_size: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    time_ms: float,
+) -> dict:
+    """
+    Calculate effective bandwidth and FLOPs for kernel.
+    Memory:
+    - Input: [B, 2H] (float32, 4 bytes)
+    - Output: [B, H] (float32, 4 bytes)
+    """
+    input_bytes = batch_size * hidden_dim * 2 * 4
+    output_bytes = batch_size * hidden_dim * 4
     total_bytes = input_bytes + output_bytes
     time_s = time_ms / 1000.0
     bandwidth_gbs = (total_bytes / 1e9) / time_s if time_s > 0 else 0
-    flops_per_elem = 5
-    total_flops = (batch_size * hidden_dim) * flops_per_elem
+    total_flops = calculate_flops(batch_size, hidden_dim)
     gflops = (total_flops / 1e9) / time_s if time_s > 0 else 0
-    return dict(
-        total_bytes=total_bytes,
-        bandwidth_gbs=bandwidth_gbs,
-        total_flops=total_flops,
-        gflops=gflops,
+    return {
+        "batch_size": batch_size,
+        "hidden_dim": hidden_dim,
+        "input_bytes": input_bytes,
+        "output_bytes": output_bytes,
+        "total_bytes": total_bytes,
+        "bandwidth_gbs": bandwidth_gbs,
+        "total_flops": total_flops,
+        "gflops": gflops,
+    }
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["batch_size", "hidden_dim"],
+        x_vals=configs,
+        line_arg="provider",
+        line_vals=["reference", "sglang"],
+        line_names=["Reference", "SGL Kernel"],
+        styles=[("blue", "-"), ("green", "-")],
+        ylabel="us",
+        plot_name="swiglu-with-alpha-limit-performance-v2",
+        args={"alpha": 1.0, "limit": 6.0, "dtype": torch.float32},
     )
-
-def correctness_check(x, y_kernel, y_ref):
-    if torch.allclose(y_kernel, y_ref, rtol=1e-5, atol=1e-6):
-        return True
-    return False
-
-batch_sizes = [1, 2, 4, 16, 32, 64]
-hidden_dims = [512, 2048, 4096]
-alpha_configs = [0.25, 1.0, 2.0]
-limit_configs = [1.0, 6.0, 12.0]
-test_configs = list(itertools.product(batch_sizes, hidden_dims, alpha_configs, limit_configs))
-
-all_results = []
-
-def benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='xpu', dtype=torch.float32, runs=100):
+)
+def benchmark_swiglu_alpha_limit(batch_size, hidden_dim, alpha, limit, dtype, provider):
+    device = torch.device("xpu")
     x = torch.randn(batch_size, hidden_dim * 2, device=device, dtype=dtype)
-    # Warmup both kernels
-    y_kernel = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
-    y_ref = reference_swiglu(x, alpha, limit)
-    # Time kernel
-    start = time.time()
-    for _ in range(runs):
-        y_kernel = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
-    end = time.time()
-    avg_us_kernel = (end - start) * 1e6 / runs
+    quantiles = [0.5, 0.2, 0.8]
 
-    # Time reference
-    start_ref = time.time()
-    for _ in range(runs):
-        y_ref = reference_swiglu(x, alpha, limit)
-    end_ref = time.time()
-    avg_us_ref = (end_ref - start_ref) * 1e6 / runs
+    if provider == "reference":
+        fn = lambda: reference_swiglu_with_alpha_and_limit(x, alpha, limit)
+    elif provider == "sglang":
+        fn = lambda: sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
 
-    # Bandwidth/flops
-    bw_kernel = calculate_bandwidth_flops(batch_size, hidden_dim, avg_us_kernel/1000.)
-    bw_ref = calculate_bandwidth_flops(batch_size, hidden_dim, avg_us_ref/1000.)
+    ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
 
-    # Correctness
-    is_correct = correctness_check(x, y_kernel, y_ref)
+    # Calculate effective bandwidth and FLOPs
+    bw_metrics = calculate_effective_bandwidth(
+        batch_size, hidden_dim, dtype, ms
+    )
 
     all_results.append(
-        dict(
-            batch_size=batch_size,
-            hidden_dim=hidden_dim,
-            alpha=alpha,
-            limit=limit,
-            dtype=str(dtype),
-            device=device,
-            time_us_kernel=avg_us_kernel,
-            time_us_reference=avg_us_ref,
-            bandwidth_gbs_kernel=round(bw_kernel["bandwidth_gbs"], 2),
-            bandwidth_gbs_reference=round(bw_ref["bandwidth_gbs"], 2),
-            total_bytes_mb=round(bw_kernel["total_bytes"] / 1e6, 2),
-            gflops_kernel=round(bw_kernel["gflops"], 2),
-            gflops_reference=round(bw_ref["gflops"], 2),
-            correct="✅" if is_correct else "❌"
-        )
+        {
+            "batch_size": batch_size,
+            "hidden_dim": hidden_dim,
+            "alpha": alpha,
+            "limit": limit,
+            "dtype": str(dtype),
+            "provider": provider,
+            "time_us": 1000 * ms,
+            "bandwidth_gbs": bw_metrics["bandwidth_gbs"],
+            "total_bytes_mb": bw_metrics["total_bytes"] / 1e6,
+            "total_flops_m": bw_metrics["total_flops"] / 1e6,
+            "gflops": bw_metrics["gflops"],
+        }
     )
-    print(
-        f"B {batch_size} H {hidden_dim} α {alpha} lim {limit} | "
-        f"Kernel {avg_us_kernel:.2f}us, Ref {avg_us_ref:.2f}us | "
-        f"BW {bw_kernel['bandwidth_gbs']:.2f}/{bw_ref['bandwidth_gbs']:.2f} GB/s | "
-        f"GFLOPS {bw_kernel['gflops']:.2f}/{bw_ref['gflops']:.2f} | {all_results[-1]['correct']}"
-    )
+
+    return 1000 * ms, 1000 * max_ms, 1000 * min_ms
+
 
 if __name__ == "__main__":
-    # Main benchmarking loop
-    for (batch_size, hidden_dim, alpha, limit) in test_configs[:10]:  # adjust for more
-        benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='xpu', dtype=torch.float32, runs=50)
+    # Test correctness kernel vs reference
+    calculate_diff(
+        batch_size=16,
+        hidden_dim=1024,
+        alpha=1.0,
+        limit=6.0,
+        dtype=torch.float32,
+    )
 
-    # Report results
+    calculate_diff(
+        batch_size=8,
+        hidden_dim=4096,
+        alpha=2.0,
+        limit=12.0,
+        dtype=torch.float32,
+    )
+
+    benchmark_swiglu_alpha_limit.run(print_data=True)
+
+    # Print bandwidth and FLOPS results
     print("\n" + "=" * 80)
-    print("Results Table")
+    print("Effective Bandwidth and FLOPS Results")
     print("=" * 80)
+
     df = pd.DataFrame(all_results)
+    df["bandwidth_gbs"] = df["bandwidth_gbs"].round(2)
+    df["total_bytes_mb"] = df["total_bytes_mb"].round(2)
+    df["time_us"] = df["time_us"].round(2)
+    df["total_flops_m"] = df["total_flops_m"].round(2)
+    df["gflops"] = df["gflops"].round(2)
+
     print(df.to_markdown(index=False))
 
-    print("\nSummary stats (Kernel):")
-    kernel_summary = df.groupby("device").agg({
-        "bandwidth_gbs_kernel": ["mean", "min", "max"],
-        "time_us_kernel": ["mean", "min", "max"],
-        "gflops_kernel": ["mean", "min", "max"],
-    })
-    print(kernel_summary.to_markdown())
-
-    print("\nSummary stats (Reference):")
-    ref_summary = df.groupby("device").agg({
-        "bandwidth_gbs_reference": ["mean", "min", "max"],
-        "time_us_reference": ["mean", "min", "max"],
-        "gflops_reference": ["mean", "min", "max"],
-    })
-    print(ref_summary.to_markdown())
+    # Print summary statistics per provider
+    print("\n" + "=" * 80)
+    print("Summary Statistics by Provider")
+    print("=" * 80)
+    summary = df.groupby("provider").agg(
+        {
+            "bandwidth_gbs": ["mean", "min", "max"],
+            "time_us": ["mean", "min", "max"],
+            "gflops": ["mean", "min", "max"],
+        }
+    )
+    print(summary.to_markdown())
