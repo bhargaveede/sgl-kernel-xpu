@@ -58,7 +58,7 @@ def sglang_bmm_fp8(
 
 def calculate_diff(batch_size: int, m: int, k: int, n: int):
     """Calculate difference between torch.bmm and SGL Kernel implementations."""
-    device = torch.device("cuda")
+    device = torch.device("xpu")
     
     input = torch.randn([batch_size, m, k], dtype=torch.bfloat16, device=device)
     # mat2 in column-major format
@@ -114,7 +114,7 @@ configs = list(itertools.product(batch_size_range, m_range, [128], [128]))
     )
 )
 def benchmark_bmm_fp8(batch_size, m, k, n, provider):
-    device = torch.device("cuda")
+    device = torch.device("xpu")
     res_dtype = torch.float16
     
     input = torch.randn([batch_size, m, k], device=device, dtype=torch.bfloat16)
