@@ -24,30 +24,31 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 
 
 def torch_bmm_fp8(
-    input: torch.Tensor,
-    mat2: torch.Tensor,
+    input_fp8: torch.Tensor,
+    mat2_fp8: torch.Tensor,
+    input_inv_s: torch.Tensor,
+    mat2_inv_s: torch.Tensor,
     res_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """Baseline implementation using torch.bmm."""
-    return torch.bmm(input, mat2).to(res_dtype)
+    # Convert FP8 to bfloat16 and descale
+    input_bf16 = input_fp8.to(torch.bfloat16) * input_inv_s
+    mat2_bf16 = mat2_fp8.to(torch.bfloat16) * mat2_inv_s
+    return torch.bmm(input_bf16, mat2_bf16).to(res_dtype)
 
 
 def sglang_bmm_fp8(
-    input: torch.Tensor,
-    mat2: torch.Tensor,
-    input_dtype: torch.dtype = torch.float8_e4m3fn,
-    mat2_dtype: torch.dtype = torch.float8_e4m3fn,
+    input_fp8: torch.Tensor,
+    mat2_fp8: torch.Tensor,
+    input_inv_s: torch.Tensor,
+    mat2_inv_s: torch.Tensor,
     res_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """SGL Kernel implementation of BMM FP8."""
-    # Convert inputs to fp8
-    input_fp8, input_inv_s = to_float8(input, dtype=input_dtype)
-    mat2_fp8, mat2_inv_s = to_float8(mat2, dtype=mat2_dtype)
-    
     # Prepare output
-    batch_size, m, k = input.shape
-    _, _, n = mat2.shape
-    res = torch.empty([batch_size, m, n], device=input.device, dtype=res_dtype)
+    batch_size, m, k = input_fp8.shape
+    _, _, n = mat2_fp8.shape
+    res = torch.empty([batch_size, m, n], device=input_fp8.device, dtype=res_dtype)
     
     # Run kernel
     bmm_fp8(input_fp8, mat2_fp8, input_inv_s, mat2_inv_s, res_dtype, res)
@@ -63,12 +64,16 @@ def calculate_diff(batch_size: int, m: int, k: int, n: int):
     # mat2 in column-major format
     mat2 = torch.randn([batch_size, n, k], dtype=torch.bfloat16, device=device).transpose(-2, -1)
     
-    torch_out = torch_bmm_fp8(input, mat2, res_dtype=torch.float16)
+    # Convert to FP8
+    input_fp8, input_inv_s = to_float8(input, dtype=fp8_e4m3_type)
+    mat2_fp8, mat2_inv_s = to_float8(mat2, dtype=fp8_e4m3_type)
+    
+    torch_out = torch_bmm_fp8(input_fp8, mat2_fp8, input_inv_s, mat2_inv_s, res_dtype=torch.float16)
     sglang_out = sglang_bmm_fp8(
-        input, 
-        mat2, 
-        input_dtype=fp8_e4m3_type,
-        mat2_dtype=fp8_e4m3_type,
+        input_fp8, 
+        mat2_fp8, 
+        input_inv_s,
+        mat2_inv_s,
         res_dtype=torch.float16
     )
     
@@ -116,16 +121,20 @@ def benchmark_bmm_fp8(batch_size, m, k, n, provider):
     # mat2 in column-major format
     mat2 = torch.randn([batch_size, n, k], device=device, dtype=torch.bfloat16).transpose(-2, -1)
     
+    # Convert to FP8
+    input_fp8, input_inv_s = to_float8(input, dtype=fp8_e4m3_type)
+    mat2_fp8, mat2_inv_s = to_float8(mat2, dtype=fp8_e4m3_type)
+    
     quantiles = [0.5, 0.2, 0.8]
     
     if provider == "torch":
-        fn = lambda: torch_bmm_fp8(input, mat2, res_dtype)
+        fn = lambda: torch_bmm_fp8(input_fp8, mat2_fp8, res_dtype)
     elif provider == "sglang":
         fn = lambda: sglang_bmm_fp8(
-            input, 
-            mat2, 
-            input_dtype=fp8_e4m3_type,
-            mat2_dtype=fp8_e4m3_type,
+            input_fp8, 
+            mat2_fp8, 
+            input_inv_s,
+            mat2_inv_s,
             res_dtype=res_dtype
         )
     
