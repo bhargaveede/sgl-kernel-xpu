@@ -3,14 +3,14 @@ import pandas as pd
 import torch
 import time
 
-# Replace this import path as needed for your project
+# Replace with the correct import if needed
 from sgl_kernel import swiglu_with_alpha_and_limit
 
 def sglang_swiglu_with_alpha_and_limit(x: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
     return swiglu_with_alpha_and_limit(x, alpha, limit)
 
 def reference_swiglu(x: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
-    a, b = torch.chunk(x, 2, dim=-1)  # x shape [B, 2H] -> a,b [B, H]
+    a, b = torch.chunk(x, 2, dim=-1)
     swiglu = a * torch.sigmoid(b)
     swiglu = alpha * swiglu
     swiglu = torch.clamp(swiglu, -limit, limit)
@@ -23,10 +23,10 @@ def calculate_bandwidth_flops(batch_size, hidden_dim, time_ms):
     output_bytes = batch_size * hidden_dim * 4         # output [B, H], float32
     total_bytes = input_bytes + output_bytes
     time_s = time_ms / 1000.0
-    bandwidth_gbs = (total_bytes / 1e9) / time_s
-    flops_per_elem = 5  # Estimate: chunk+sigmoid+mul+scale+clamp for each output element
+    bandwidth_gbs = (total_bytes / 1e9) / time_s if time_s > 0 else 0
+    flops_per_elem = 5
     total_flops = (batch_size * hidden_dim) * flops_per_elem
-    gflops = (total_flops / 1e9) / time_s
+    gflops = (total_flops / 1e9) / time_s if time_s > 0 else 0
     return dict(
         total_bytes=total_bytes,
         bandwidth_gbs=bandwidth_gbs,
@@ -34,14 +34,10 @@ def calculate_bandwidth_flops(batch_size, hidden_dim, time_ms):
         gflops=gflops,
     )
 
-def correctness_check(batch_size, hidden_dim, alpha, limit, device):
-    x = torch.randn(batch_size, hidden_dim * 2, device=device, dtype=torch.float32)
-    y_ref = reference_swiglu(x, alpha, limit)
-    y_sglang = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
-    if torch.allclose(y_ref, y_sglang, rtol=1e-5, atol=1e-6):
-        print(f"✅ Kernel output matches reference")
-    else:
-        print("❌ Kernel output differs from reference")
+def correctness_check(x, y_kernel, y_ref):
+    if torch.allclose(y_kernel, y_ref, rtol=1e-5, atol=1e-6):
+        return True
+    return False
 
 batch_sizes = [1, 2, 4, 16, 32, 64]
 hidden_dims = [512, 2048, 4096]
@@ -51,21 +47,32 @@ test_configs = list(itertools.product(batch_sizes, hidden_dims, alpha_configs, l
 
 all_results = []
 
-def benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='cuda', dtype=torch.float32, runs=100):
+def benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='xpu', dtype=torch.float32, runs=100):
     x = torch.randn(batch_size, hidden_dim * 2, device=device, dtype=dtype)
-    # Warmup
-    y = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
-    if device == 'cuda':
-        torch.cuda.synchronize()
+    # Warmup both kernels
+    y_kernel = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
+    y_ref = reference_swiglu(x, alpha, limit)
+    # Time kernel
     start = time.time()
     for _ in range(runs):
-        y = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
-    if device == 'cuda':
-        torch.cuda.synchronize()
+        y_kernel = sglang_swiglu_with_alpha_and_limit(x, alpha, limit)
     end = time.time()
-    avg_us = (end - start) * 1e6 / runs
+    avg_us_kernel = (end - start) * 1e6 / runs
 
-    bw_metrics = calculate_bandwidth_flops(batch_size, hidden_dim, avg_us/1000.)
+    # Time reference
+    start_ref = time.time()
+    for _ in range(runs):
+        y_ref = reference_swiglu(x, alpha, limit)
+    end_ref = time.time()
+    avg_us_ref = (end_ref - start_ref) * 1e6 / runs
+
+    # Bandwidth/flops
+    bw_kernel = calculate_bandwidth_flops(batch_size, hidden_dim, avg_us_kernel/1000.)
+    bw_ref = calculate_bandwidth_flops(batch_size, hidden_dim, avg_us_ref/1000.)
+
+    # Correctness
+    is_correct = correctness_check(x, y_kernel, y_ref)
+
     all_results.append(
         dict(
             batch_size=batch_size,
@@ -74,21 +81,27 @@ def benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='cuda', dtype=
             limit=limit,
             dtype=str(dtype),
             device=device,
-            time_us=avg_us,
-            bandwidth_gbs=round(bw_metrics["bandwidth_gbs"], 2),
-            total_bytes_mb=round(bw_metrics["total_bytes"] / 1e6, 2),
-            gflops=round(bw_metrics["gflops"], 2),
+            time_us_kernel=avg_us_kernel,
+            time_us_reference=avg_us_ref,
+            bandwidth_gbs_kernel=round(bw_kernel["bandwidth_gbs"], 2),
+            bandwidth_gbs_reference=round(bw_ref["bandwidth_gbs"], 2),
+            total_bytes_mb=round(bw_kernel["total_bytes"] / 1e6, 2),
+            gflops_kernel=round(bw_kernel["gflops"], 2),
+            gflops_reference=round(bw_ref["gflops"], 2),
+            correct="✅" if is_correct else "❌"
         )
     )
-    print(f"Batch {batch_size} Hidden {hidden_dim} alpha {alpha} limit {limit} -> {avg_us:.2f} us, BW {bw_metrics['bandwidth_gbs']:.2f} GB/s, GFLOPS {bw_metrics['gflops']:.2f}")
+    print(
+        f"B {batch_size} H {hidden_dim} α {alpha} lim {limit} | "
+        f"Kernel {avg_us_kernel:.2f}us, Ref {avg_us_ref:.2f}us | "
+        f"BW {bw_kernel['bandwidth_gbs']:.2f}/{bw_ref['bandwidth_gbs']:.2f} GB/s | "
+        f"GFLOPS {bw_kernel['gflops']:.2f}/{bw_ref['gflops']:.2f} | {all_results[-1]['correct']}"
+    )
 
 if __name__ == "__main__":
-    # Correctness check
-    correctness_check(4, 1024, 1.0, 6.0, device='cuda')
-
     # Main benchmarking loop
-    for (batch_size, hidden_dim, alpha, limit) in test_configs[:10]:  # first 10 configs, adjust for more
-        benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='cuda', dtype=torch.float32, runs=50)
+    for (batch_size, hidden_dim, alpha, limit) in test_configs[:10]:  # adjust for more
+        benchmark_swiglu(batch_size, hidden_dim, alpha, limit, device='xpu', dtype=torch.float32, runs=50)
 
     # Report results
     print("\n" + "=" * 80)
@@ -97,10 +110,18 @@ if __name__ == "__main__":
     df = pd.DataFrame(all_results)
     print(df.to_markdown(index=False))
 
-    print("\nSummary stats:")
-    summary = df.groupby("device").agg({
-        "bandwidth_gbs": ["mean", "min", "max"],
-        "time_us": ["mean", "min", "max"],
-        "gflops": ["mean", "min", "max"],
+    print("\nSummary stats (Kernel):")
+    kernel_summary = df.groupby("device").agg({
+        "bandwidth_gbs_kernel": ["mean", "min", "max"],
+        "time_us_kernel": ["mean", "min", "max"],
+        "gflops_kernel": ["mean", "min", "max"],
     })
-    print(summary.to_markdown())
+    print(kernel_summary.to_markdown())
+
+    print("\nSummary stats (Reference):")
+    ref_summary = df.groupby("device").agg({
+        "bandwidth_gbs_reference": ["mean", "min", "max"],
+        "time_us_reference": ["mean", "min", "max"],
+        "gflops_reference": ["mean", "min", "max"],
+    })
+    print(ref_summary.to_markdown())
