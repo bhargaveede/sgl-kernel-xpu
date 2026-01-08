@@ -6,7 +6,6 @@ import triton.testing
 from sgl_kernel import swiglu_with_alpha_and_limit
 
 def reference_swiglu_with_alpha_and_limit(x, alpha, limit):
-    # x [B, 2H]
     a, b = torch.chunk(x, 2, dim=-1)
     swiglu = a * torch.sigmoid(b)
     swiglu = alpha * swiglu
@@ -14,7 +13,6 @@ def reference_swiglu_with_alpha_and_limit(x, alpha, limit):
     return swiglu
 
 def sglang_swiglu_with_alpha_and_limit(x, alpha, limit):
-    # x [B, 2H]
     return swiglu_with_alpha_and_limit(x, alpha, limit)
 
 def calculate_diff(batch_size, hidden_dim, alpha, limit, dtype):
@@ -37,19 +35,11 @@ def calculate_diff(batch_size, hidden_dim, alpha, limit, dtype):
 
 batch_size_range = [1, 4, 8, 16, 32]
 hidden_dim_range = [512, 1024, 2048, 4096]
-alpha_range = [0.25, 1.0, 2.0]
-limit_range = [1.0, 6.0, 12.0]
-
-# (batch_size, hidden_dim, alpha, limit)
-configs = list(itertools.product(batch_size_range, hidden_dim_range, [1.0], [6.0]))
+configs = list(itertools.product(batch_size_range, hidden_dim_range))
 all_results = []
 
 def calculate_flops(batch_size, hidden_dim):
-    """
-    Estimate FLOPs for Swiglu with alpha and limit:
-    For each output element: 1 sigmoid + 1 mul + 1 alpha scale + 1 clamp + 1 split = 5 ops
-    Total: batch_size * hidden_dim * 5
-    """
+    # [B, H], 5 ops per output entry
     return batch_size * hidden_dim * 5
 
 def calculate_effective_bandwidth(
@@ -58,14 +48,8 @@ def calculate_effective_bandwidth(
     dtype: torch.dtype,
     time_ms: float,
 ) -> dict:
-    """
-    Calculate effective bandwidth and FLOPs for kernel.
-    Memory:
-    - Input: [B, 2H] (float32, 4 bytes)
-    - Output: [B, H] (float32, 4 bytes)
-    """
-    input_bytes = batch_size * hidden_dim * 2 * 4
-    output_bytes = batch_size * hidden_dim * 4
+    input_bytes = batch_size * hidden_dim * 2 * 4  # [B, 2H] float32
+    output_bytes = batch_size * hidden_dim * 4     # [B, H] float32
     total_bytes = input_bytes + output_bytes
     time_s = time_ms / 1000.0
     bandwidth_gbs = (total_bytes / 1e9) / time_s if time_s > 0 else 0
@@ -107,7 +91,6 @@ def benchmark_swiglu_alpha_limit(batch_size, hidden_dim, alpha, limit, dtype, pr
 
     ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
 
-    # Calculate effective bandwidth and FLOPs
     bw_metrics = calculate_effective_bandwidth(
         batch_size, hidden_dim, dtype, ms
     )
@@ -130,7 +113,6 @@ def benchmark_swiglu_alpha_limit(batch_size, hidden_dim, alpha, limit, dtype, pr
 
     return 1000 * ms, 1000 * max_ms, 1000 * min_ms
 
-
 if __name__ == "__main__":
     # Test correctness kernel vs reference
     calculate_diff(
@@ -144,8 +126,8 @@ if __name__ == "__main__":
     calculate_diff(
         batch_size=8,
         hidden_dim=4096,
-        alpha=2.0,
-        limit=12.0,
+        alpha=1.0,
+        limit=6.0,
         dtype=torch.float32,
     )
 
