@@ -187,7 +187,7 @@ def calculate_diff(num_tokens, num_heads, head_size, dtype):
 
 num_tokens_range = [256, 512, 1024]
 num_heads_range = [8, 16, 32]
-head_size_range = [32, 48, 64, 128, 256]
+head_size_range = [32, 48, 64, 128]
 dtype_range = [torch.float16, torch.bfloat16]
 
 configs = list(
