@@ -221,21 +221,11 @@ def calculate_bandwidth(num_tokens, num_heads, head_size, dtype, time_ms):
     return (total_bytes / 1e9) / time_s
 
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=["num_tokens", "num_heads", "head_size", "dtype"],
-        x_vals=configs,
-        line_arg="provider",
-        line_vals=["triton", "sglang"],
-        line_names=["Triton", "SGL Kernel"],
-        styles=[("blue", "-"), ("green", "-")],
-        ylabel="us",
-        plot_name="merge-state-v2-performance",
-        args={},
-    )
-)
-def benchmark(num_tokens, num_heads, head_size, dtype, provider):
+def benchmark_kernel(num_tokens, num_heads, head_size, dtype, provider):
+    """Benchmark a single kernel configuration using XPU events for accurate timing."""
     device = torch.device("xpu")
+    warmup_times = 2
+    repeat_times = 20
 
     # Create test tensors
     prefix_lse = torch.randn(num_tokens, num_heads, dtype=torch.float32, device=device)
@@ -256,36 +246,38 @@ def benchmark(num_tokens, num_heads, head_size, dtype, provider):
     output = torch.empty_like(prefix_output)
     output_lse = torch.empty_like(prefix_lse)
 
-    quantiles = [0.5, 0.2, 0.8]
-
     if provider == "triton":
-        fn = lambda: triton_merge_state(
+        kernel_fn = lambda: triton_merge_state(
             prefix_output, prefix_lse, suffix_output, suffix_lse, output, output_lse
         )
     elif provider == "sglang":
-        fn = lambda: sglang_merge_state(
+        kernel_fn = lambda: sglang_merge_state(
             prefix_output, prefix_lse, suffix_output, suffix_lse, output, output_lse
         )
 
-    ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
+    # Warmup
+    for _ in range(warmup_times):
+        kernel_fn()
+    torch.xpu.synchronize()
+
+    # Benchmark
+    total_time = 0
+    start = torch.xpu.Event(enable_timing=True)
+    end = torch.xpu.Event(enable_timing=True)
+
+    for _ in range(repeat_times):
+        start.record()
+        kernel_fn()
+        end.record()
+        torch.xpu.synchronize()
+        total_time += start.elapsed_time(end)
+
+    avg_time_ms = total_time / repeat_times
 
     # Calculate bandwidth
-    bandwidth_gbs = calculate_bandwidth(num_tokens, num_heads, head_size, dtype, ms)
+    bandwidth_gbs = calculate_bandwidth(num_tokens, num_heads, head_size, dtype, avg_time_ms)
     
-    # Store results for later analysis
-    all_results.append(
-        {
-            "num_tokens": num_tokens,
-            "num_heads": num_heads,
-            "head_size": head_size,
-            "dtype": str(dtype).replace("torch.", ""),
-            "provider": provider,
-            "time_us": 1000 * ms,
-            "bandwidth_gbs": bandwidth_gbs,
-        }
-    )
-
-    return 1000 * ms, 1000 * max_ms, 1000 * min_ms
+    return avg_time_ms, bandwidth_gbs
 
 
 if __name__ == "__main__":
@@ -297,7 +289,34 @@ if __name__ == "__main__":
 
     # Run benchmarks
     print("Running benchmarks...")
-    benchmark.run(print_data=True)
+    print("=" * 100)
+    
+    for config in configs:
+        num_tokens, num_heads, head_size, dtype = config
+        
+        # Benchmark both providers
+        for provider in ["triton", "sglang"]:
+            time_ms, bandwidth_gbs = benchmark_kernel(
+                num_tokens, num_heads, head_size, dtype, provider
+            )
+            
+            all_results.append(
+                {
+                    "num_tokens": num_tokens,
+                    "num_heads": num_heads,
+                    "head_size": head_size,
+                    "dtype": str(dtype).replace("torch.", ""),
+                    "provider": provider,
+                    "time_ms": time_ms,
+                    "bandwidth_gbs": bandwidth_gbs,
+                }
+            )
+            
+            print(f"{provider:8s} | tokens={num_tokens:4d} heads={num_heads:2d} "
+                  f"head_size={head_size:3d} dtype={str(dtype).replace('torch.', ''):8s} | "
+                  f"{time_ms:7.4f}ms | {bandwidth_gbs:6.2f} GB/s")
+    
+    print("=" * 100)
     
     # Print bandwidth results
     print("\n" + "=" * 80)
@@ -305,7 +324,7 @@ if __name__ == "__main__":
     print("=" * 80)
     df = pd.DataFrame(all_results)
     df["bandwidth_gbs"] = df["bandwidth_gbs"].round(2)
-    df["time_us"] = df["time_us"].round(2)
+    df["time_ms"] = df["time_ms"].round(4)
     print(df.to_markdown(index=False))
 
     # Summary statistics
@@ -314,11 +333,30 @@ if __name__ == "__main__":
     print("=" * 80)
     summary = df.groupby("provider").agg(
         {
-            "time_us": ["mean", "min", "max"],
+            "time_ms": ["mean", "min", "max"],
             "bandwidth_gbs": ["mean", "min", "max"],
         }
     )
     print(summary.to_markdown())
+    
+    # Speedup comparison
+    print("\n" + "=" * 80)
+    print("Speedup: SGL Kernel vs Triton")
+    print("=" * 80)
+    
+    # Pivot to compare providers side by side
+    df_pivot = df.pivot_table(
+        index=["num_tokens", "num_heads", "head_size", "dtype"],
+        columns="provider",
+        values="time_ms"
+    )
+    df_pivot["speedup"] = df_pivot["triton"] / df_pivot["sglang"]
+    df_pivot = df_pivot.round(4)
+    print(df_pivot.to_markdown())
+    
+    print(f"\nAverage speedup: {df_pivot['speedup'].mean():.4f}x")
+    print(f"Min speedup: {df_pivot['speedup'].min():.4f}x")
+    print(f"Max speedup: {df_pivot['speedup'].max():.4f}x")
     
     # Summary by dtype
     print("\n" + "=" * 80)
@@ -326,7 +364,7 @@ if __name__ == "__main__":
     print("=" * 80)
     dtype_summary = df.groupby(["dtype", "provider"]).agg(
         {
-            "time_us": "mean",
+            "time_ms": "mean",
             "bandwidth_gbs": "mean",
         }
     )
