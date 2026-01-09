@@ -1,10 +1,14 @@
 import itertools
 from typing import Optional, Tuple
 
+import pandas as pd
 import torch
 import triton
 import triton.language as tl
 from sgl_kernel import merge_state_v2
+
+
+all_results = []
 
 
 @triton.jit
@@ -194,6 +198,29 @@ configs = list(
 )
 
 
+def calculate_bandwidth(num_tokens, num_heads, head_size, dtype, time_ms):
+    """
+    Calculate approximate effective bandwidth for merge_state_v2.
+    
+    Memory access pattern:
+    - Read: prefix_output, suffix_output (2 tensors of [num_tokens, num_heads, head_size])
+    - Read: prefix_lse, suffix_lse (2 tensors of [num_tokens, num_heads])
+    - Write: output (1 tensor of [num_tokens, num_heads, head_size])
+    - Write: output_lse (1 tensor of [num_tokens, num_heads])
+    """
+    dtype_size = 2 if dtype in [torch.float16, torch.bfloat16] else 4
+    lse_size = 4  # float32
+    
+    # Read 2 outputs + 2 lse tensors
+    bytes_read = 2 * (num_tokens * num_heads * head_size * dtype_size) + 2 * (num_tokens * num_heads * lse_size)
+    # Write 1 output + 1 lse tensor
+    bytes_write = (num_tokens * num_heads * head_size * dtype_size) + (num_tokens * num_heads * lse_size)
+    
+    total_bytes = bytes_read + bytes_write
+    time_s = time_ms / 1000.0
+    return (total_bytes / 1e9) / time_s
+
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["num_tokens", "num_heads", "head_size", "dtype"],
@@ -242,6 +269,22 @@ def benchmark(num_tokens, num_heads, head_size, dtype, provider):
 
     ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
 
+    # Calculate bandwidth
+    bandwidth_gbs = calculate_bandwidth(num_tokens, num_heads, head_size, dtype, ms)
+    
+    # Store results for later analysis
+    all_results.append(
+        {
+            "num_tokens": num_tokens,
+            "num_heads": num_heads,
+            "head_size": head_size,
+            "dtype": str(dtype).replace("torch.", ""),
+            "provider": provider,
+            "time_us": 1000 * ms,
+            "bandwidth_gbs": bandwidth_gbs,
+        }
+    )
+
     return 1000 * ms, 1000 * max_ms, 1000 * min_ms
 
 
@@ -255,3 +298,37 @@ if __name__ == "__main__":
     # Run benchmarks
     print("Running benchmarks...")
     benchmark.run(print_data=True)
+    
+    # Print bandwidth results
+    print("\n" + "=" * 80)
+    print("Effective Bandwidth Results")
+    print("=" * 80)
+    df = pd.DataFrame(all_results)
+    df["bandwidth_gbs"] = df["bandwidth_gbs"].round(2)
+    df["time_us"] = df["time_us"].round(2)
+    print(df.to_markdown(index=False))
+
+    # Summary statistics
+    print("\n" + "=" * 80)
+    print("Summary Statistics by Provider")
+    print("=" * 80)
+    summary = df.groupby("provider").agg(
+        {
+            "time_us": ["mean", "min", "max"],
+            "bandwidth_gbs": ["mean", "min", "max"],
+        }
+    )
+    print(summary.to_markdown())
+    
+    # Summary by dtype
+    print("\n" + "=" * 80)
+    print("Summary Statistics by Data Type")
+    print("=" * 80)
+    dtype_summary = df.groupby(["dtype", "provider"]).agg(
+        {
+            "time_us": "mean",
+            "bandwidth_gbs": "mean",
+        }
+    )
+    print(dtype_summary.to_markdown())
+
