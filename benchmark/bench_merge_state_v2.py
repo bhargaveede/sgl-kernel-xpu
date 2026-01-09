@@ -69,19 +69,18 @@ def merge_state_kernel(
     )
 
 
-def triton_merge_state(
+def merge_state_triton(
     prefix_output: torch.Tensor,
     prefix_lse: torch.Tensor,
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
     output: Optional[torch.Tensor] = None,
     output_lse: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    num_tokens = prefix_output.shape[0]
-    num_query_heads = prefix_output.shape[1]
-    head_size = prefix_output.shape[2]
+) -> None:
+    num_tokens = output.shape[0]
+    num_query_heads = output.shape[1]
+    head_size = output.shape[2]
     padded_head_size = triton.next_power_of_2(head_size)
-    
     # Avoid creating new tensors if they are already provided
     if output is None:
         output = torch.empty_like(prefix_output)
