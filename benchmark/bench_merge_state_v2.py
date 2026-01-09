@@ -69,7 +69,7 @@ def merge_state_kernel(
     )
 
 
-def merge_state_triton(
+def triton_merge_state(
     prefix_output: torch.Tensor,
     prefix_lse: torch.Tensor,
     suffix_output: torch.Tensor,
@@ -185,9 +185,9 @@ def calculate_diff(num_tokens, num_heads, head_size, dtype):
         print(f"   Max LSE diff: {max_lse_diff:.6f}")
 
 
-num_tokens_range = [256, 512, 1024, 2048]
+num_tokens_range = [256, 512, 1024]
 num_heads_range = [8, 16, 32]
-head_size_range = [64, 128, 256]
+head_size_range = [32, 48, 64, 128, 256]
 dtype_range = [torch.float16, torch.bfloat16]
 
 configs = list(
