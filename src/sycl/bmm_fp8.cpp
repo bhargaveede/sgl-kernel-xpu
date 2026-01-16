@@ -104,11 +104,13 @@ struct BmmFP8Runner {
     StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, shape_CD);
 
     float scale_value = scales_a.item<float>();
-    auto scale_tensora = torch::full({M},static_cast<float>(scale_value),torch::dtype(torch::kFloat16).device(torch::kXPU));
+    auto scale_tensora =
+        torch::full({M}, static_cast<float>(scale_value), torch::dtype(torch::kFloat16).device(torch::kXPU));
     cutlass::half_t* ptr_scale_A = reinterpret_cast<cutlass::half_t*>(scale_tensora.data_ptr<at::Half>());
-     scale_value = scales_b.item<float>();
-     auto scale_tensorb = torch::full({N},static_cast<float>(scale_value),torch::dtype(torch::kFloat16).device(torch::kXPU));
-     cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(scale_tensorb.data_ptr<at::Half>());
+    scale_value = scales_b.item<float>();
+    auto scale_tensorb =
+        torch::full({N}, static_cast<float>(scale_value), torch::dtype(torch::kFloat16).device(torch::kXPU));
+    cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(scale_tensorb.data_ptr<at::Half>());
     StrideScale stride_SA = cute::make_stride(Int<1>{}, 0L, 0L);
     StrideScale stride_SB = cute::make_stride(Int<1>{}, 0L, 0L);
 
@@ -254,8 +256,8 @@ static at::Tensor bmm_fp8_impl(
     const at::ScalarType out_dtype,
     at::Tensor& out,
     const cutlass::KernelHardwareInfo& hw_info) {
-  at::Tensor mat_a_contig = mat_a.contiguous();
-  at::Tensor mat_b_contig = mat_b.contiguous();
+  at::Tensor mat_a_contig = mat_a.is_contiguous() ? mat_a : mat_a.contiguous();
+  at::Tensor mat_b_contig = mat_b.is_contiguous() ? mat_b : mat_b.contiguous();
 
   cutlass::Status status;
 
@@ -275,7 +277,7 @@ static at::Tensor bmm_fp8_impl(
 
   return out;
 }
- void bmm_fp8(
+void bmm_fp8(
     at::Tensor mat_a,
     at::Tensor mat_b,
     at::Tensor mat_d,
@@ -284,10 +286,10 @@ static at::Tensor bmm_fp8_impl(
     at::Tensor workspace_buffer,
     int64_t cublas_handle,
     int64_t cuda_stream) {
-// Main entry point
+  // Main entry point
 
-//TODO: Check workspace_buffer and empty it
-// Input validation
+  // TODO: Check workspace_buffer and empty it
+  //  Input validation
   auto input_dtype = mat_a.scalar_type();
   auto out_dtype = mat_d.scalar_type();
   TORCH_CHECK(
@@ -306,15 +308,6 @@ static at::Tensor bmm_fp8_impl(
   CHECK_DEVICE(scales_a);
   CHECK_DEVICE(scales_b);
 
-//   TORCH_CHECK(mat_a.dim() == 2, "mat_a must be 2D");
-//   TORCH_CHECK(mat_b.dim() == 2, "mat_b must be 2D");
-if(cute::thread(0,0)){
-
-// print(mat_a);
-// print(mat_b);
-// print(mat_d);
-}
-
   int M = mat_a.size(1);
   int K = mat_a.size(2);
   int L = mat_a.size(0);
@@ -324,18 +317,10 @@ if(cute::thread(0,0)){
 
   TORCH_CHECK(K == K_b, "Inner dimensions must match");
   TORCH_CHECK(L == L_b, "Batch dimension must match");
-  // TORCH_CHECK(scales_a.size(0) == M, "scales_a must have size M");
-  // TORCH_CHECK(scales_b.size(0) == N, "scales_b must have size N");
-  // TORCH_CHECK(scales_a.is_contiguous(), "scales_a must be contiguous");
-  // TORCH_CHECK(scales_b.is_contiguous(), "scales_b must be contiguous");
 
   // Convert scales to half precision for GEMM
   at::Tensor scales_a_half = scales_a.to(at::ScalarType::Half).contiguous();
   at::Tensor scales_b_half = scales_b.to(at::ScalarType::Half).contiguous();
-
-  // Convert back to FP32 for precise calculations
-  at::Tensor scales_a_for_unscale = scales_a_half.to(at::ScalarType::Float);
-  at::Tensor scales_b_for_unscale = scales_b_half.to(at::ScalarType::Float);
 
   // For FP8 output, use FP16 intermediate or requested out dtype
   at::ScalarType intermediate_dtype;
@@ -353,10 +338,8 @@ if(cute::thread(0,0)){
 
   // Dispatch based on input FP8 type
   if (input_dtype == at::ScalarType::Float8_e4m3fn) {
-    bmm_fp8_impl<cutlass::float_e4m3_t>(
-        mat_a, mat_b, scales_a_half, scales_b_half, intermediate_dtype, mat_d, hw_info);
+    bmm_fp8_impl<cutlass::float_e4m3_t>(mat_a, mat_b, scales_a_half, scales_b_half, intermediate_dtype, mat_d, hw_info);
   } else {
-    bmm_fp8_impl<cutlass::float_e5m2_t>(
-        mat_a, mat_b, scales_a_half, scales_b_half, intermediate_dtype, mat_d, hw_info);
+    bmm_fp8_impl<cutlass::float_e5m2_t>(mat_a, mat_b, scales_a_half, scales_b_half, intermediate_dtype, mat_d, hw_info);
   }
 }
