@@ -103,10 +103,13 @@ struct BmmFP8Runner {
     StrideC stride_C = cutlass::make_cute_packed_stride(StrideC{}, shape_CD);
     StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, shape_CD);
 
-    // For per-tensor scaling: broadcast scalar across M/N dimensions
-    // Stride pattern (1,0,0) with size-1 tensor achieves broadcast
-    cutlass::half_t* ptr_scale_A = reinterpret_cast<cutlass::half_t*>(const_cast<at::Half*>(scales_a.data_ptr<at::Half>()));
-    cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(const_cast<at::Half*>(scales_b.data_ptr<at::Half>()));
+    // For per-tensor scaling: expand scalar to vectors with stride (_1, 0L, 0L)
+    // Using expand() creates a view without allocating new memory
+    at::Tensor scale_a_expanded = scales_a.squeeze().expand({M});
+    at::Tensor scale_b_expanded = scales_b.squeeze().expand({N});
+    
+    cutlass::half_t* ptr_scale_A = reinterpret_cast<cutlass::half_t*>(scale_a_expanded.data_ptr<at::Half>());
+    cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(scale_b_expanded.data_ptr<at::Half>());
     StrideScale stride_SA = cute::make_stride(Int<1>{}, 0L, 0L);
     StrideScale stride_SB = cute::make_stride(Int<1>{}, 0L, 0L);
 
