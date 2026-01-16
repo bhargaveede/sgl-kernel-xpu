@@ -103,22 +103,14 @@ struct BmmFP8Runner {
     StrideC stride_C = cutlass::make_cute_packed_stride(StrideC{}, shape_CD);
     StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, shape_CD);
 
-    float scale_value = scales_a.item<float>();
-    auto scale_tensora =
-        torch::full({M}, static_cast<float>(scale_value), torch::dtype(torch::kFloat16).device(torch::kXPU));
-    cutlass::half_t* ptr_scale_A = reinterpret_cast<cutlass::half_t*>(scale_tensora.data_ptr<at::Half>());
-    scale_value = scales_b.item<float>();
-    auto scale_tensorb =
-        torch::full({N}, static_cast<float>(scale_value), torch::dtype(torch::kFloat16).device(torch::kXPU));
-    cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(scale_tensorb.data_ptr<at::Half>());
-    StrideScale stride_SA = cute::make_stride(Int<1>{}, 0L, 0L);
-    StrideScale stride_SB = cute::make_stride(Int<1>{}, 0L, 0L);
+    // Use pointers from input scale tensors directly (already converted to half)
+    cutlass::half_t* ptr_scale_A = reinterpret_cast<cutlass::half_t*>(const_cast<at::Half*>(scales_a.data_ptr<at::Half>()));
+    cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(const_cast<at::Half*>(scales_b.data_ptr<at::Half>()));
+    StrideScale stride_SA = cute::make_stride(Int<0>{}, Int<0>{}, Int<0>{});
+    StrideScale stride_SB = cute::make_stride(Int<0>{}, Int<0>{}, Int<0>{});
 
     float alpha = 1.0f;
     float beta = 0.0f;
-
-    // Create a dummy C tensor
-    cutlass::device_memory::allocation<ElementC> dummy_C(M * N * L);
 
     // Prepare arguments
     typename Gemm::GemmKernel::Arguments arguments{
@@ -137,7 +129,7 @@ struct BmmFP8Runner {
          nullptr,
          stride_SB,  // No zero point for B
          K},         // group_size = K for per-row/col scaling
-        {{alpha, beta}, dummy_C.get(), stride_C, static_cast<ElementOutput*>(out.data_ptr()), stride_D},
+        {{alpha, beta}, nullptr, stride_C, static_cast<ElementOutput*>(out.data_ptr()), stride_D},
         hw_info};
 
     Gemm gemm_op;
@@ -249,26 +241,27 @@ static inline bool is_fp8_dtype(at::ScalarType dtype) {
 // Helper function to dispatch based on input FP8 type and output dtype
 template <typename ElementInputFp8>
 static at::Tensor bmm_fp8_impl(
-    const at::Tensor& mat_a,
-    const at::Tensor& mat_b,
+    at::Tensor mat_a,
+    at::Tensor mat_b,
     const at::Tensor& scales_a_half,
     const at::Tensor& scales_b_half,
     const at::ScalarType out_dtype,
     at::Tensor& out,
     const cutlass::KernelHardwareInfo& hw_info) {
-  at::Tensor mat_a_contig = mat_a.is_contiguous() ? mat_a : mat_a.contiguous();
-  at::Tensor mat_b_contig = mat_b.is_contiguous() ? mat_b : mat_b.contiguous();
+  // Ensure contiguous memory layout
+  if (!mat_a.is_contiguous()) mat_a = mat_a.contiguous();
+  if (!mat_b.is_contiguous()) mat_b = mat_b.contiguous();
 
   cutlass::Status status;
 
   if (out_dtype == at::ScalarType::BFloat16) {
     using Config = BmmFP8Config<ElementInputFp8, cutlass::bfloat16_t>;
     BmmFP8Runner<typename Config::Gemm, cutlass::bfloat16_t> runner;
-    status = runner.run(mat_a_contig, mat_b_contig, scales_a_half, scales_b_half, out, hw_info);
+    status = runner.run(mat_a, mat_b, scales_a_half, scales_b_half, out, hw_info);
   } else {  // Half - used for both FP16 output and FP8 intermediate
     using Config = BmmFP8Config<ElementInputFp8, cutlass::half_t>;
     BmmFP8Runner<typename Config::Gemm, cutlass::half_t> runner;
-    status = runner.run(mat_a_contig, mat_b_contig, scales_a_half, scales_b_half, out, hw_info);
+    status = runner.run(mat_a, mat_b, scales_a_half, scales_b_half, out, hw_info);
   }
 
   TORCH_CHECK(
@@ -318,9 +311,13 @@ void bmm_fp8(
   TORCH_CHECK(K == K_b, "Inner dimensions must match");
   TORCH_CHECK(L == L_b, "Batch dimension must match");
 
-  // Convert scales to half precision for GEMM
-  at::Tensor scales_a_half = scales_a.to(at::ScalarType::Half).contiguous();
-  at::Tensor scales_b_half = scales_b.to(at::ScalarType::Half).contiguous();
+  // Convert scales to half precision for GEMM - use scalar tensors for per-tensor scaling
+  at::Tensor scales_a_half = scales_a.to(at::ScalarType::Half);
+  at::Tensor scales_b_half = scales_b.to(at::ScalarType::Half);
+  
+  // Ensure scales are contiguous
+  if (!scales_a_half.is_contiguous()) scales_a_half = scales_a_half.contiguous();
+  if (!scales_b_half.is_contiguous()) scales_b_half = scales_b_half.contiguous();
 
   // For FP8 output, use FP16 intermediate or requested out dtype
   at::ScalarType intermediate_dtype;
