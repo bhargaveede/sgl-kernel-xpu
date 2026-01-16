@@ -103,11 +103,12 @@ struct BmmFP8Runner {
     StrideC stride_C = cutlass::make_cute_packed_stride(StrideC{}, shape_CD);
     StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, shape_CD);
 
-    // Use pointers from input scale tensors directly (already converted to half)
+    // For per-tensor scaling: broadcast scalar across M/N dimensions
+    // Stride pattern (1,0,0) with size-1 tensor achieves broadcast
     cutlass::half_t* ptr_scale_A = reinterpret_cast<cutlass::half_t*>(const_cast<at::Half*>(scales_a.data_ptr<at::Half>()));
     cutlass::half_t* ptr_scale_B = reinterpret_cast<cutlass::half_t*>(const_cast<at::Half*>(scales_b.data_ptr<at::Half>()));
-    StrideScale stride_SA = cute::make_stride(Int<0>{}, Int<0>{}, Int<0>{});
-    StrideScale stride_SB = cute::make_stride(Int<0>{}, Int<0>{}, Int<0>{});
+    StrideScale stride_SA = cute::make_stride(Int<1>{}, 0L, 0L);
+    StrideScale stride_SB = cute::make_stride(Int<1>{}, 0L, 0L);
 
     float alpha = 1.0f;
     float beta = 0.0f;
