@@ -72,12 +72,16 @@ def compute_inv_freq_yarn(
 ):
     """Compute inverse frequencies for YARN RoPE."""
     inv_freq = 1.0 / (
-        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+        base
+        ** (
+            torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
+            / rotary_dim
+        )
     )
 
     if factor != 1.0:
         # YARN scaling
-        dim_range = torch.arange(0, rotary_dim, 2, dtype=torch.float32)
+        dim_range = torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
 
         # Compute linear interpolation factor
         linear_func = (dim_range - low_freq_factor) / (
