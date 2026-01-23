@@ -49,8 +49,9 @@ inline T subGroupReduceSum(T val, const sycl::sub_group& sg) {
   return val;
 }
 
-inline float compute_freq_yarn(float base, int head_dim, int half_dim, float factor, float low, float high) {
-  float freq = sycl::pow(base, -2.0f * half_dim / static_cast<float>(head_dim));
+inline float compute_freq_yarn(float base, int rotary_dim, int half_dim, float factor, float low, float high) {
+  // freq_idx is the value from arange(0, rotary_dim, 2): i.e., 0, 2, 4, 6, ...
+  float freq = sycl::pow(base, -2.0f * static_cast<float>(half_dim) / static_cast<float>(rotary_dim));
 
   if (factor != 1.0f) {
     float inv_freq_extrapolation = freq;
@@ -61,12 +62,13 @@ inline float compute_freq_yarn(float base, int head_dim, int half_dim, float fac
       high_adj += 0.001f;
     }
 
-    float linear_func = (static_cast<float>(half_dim) - low) / (high_adj - low);
+    // Match Python: dim_range is [0, 2, 4, 6, ...], so use 2*half_dim
+    float dim_value = 2.0f * static_cast<float>(half_dim);
+    float linear_func = (dim_value - low) / (high_adj - low);
     float ramp_func = sycl::fmin(sycl::fmax(linear_func, 0.0f), 1.0f);
-    float inv_freq_extrapolation_factor = 1.0f - ramp_func;
 
-    freq = inv_freq_interpolation * (1.0f - inv_freq_extrapolation_factor) +
-           inv_freq_extrapolation * inv_freq_extrapolation_factor;
+    // Match Python formula exactly
+    freq = inv_freq_interpolation * (1.0f - ramp_func) + inv_freq_extrapolation * ramp_func;
   }
 
   return freq;
@@ -99,11 +101,9 @@ struct FusedQKNormRopeKernel {
     const int warpId = item.get_local_id(0) / sg_size;
     const int laneId = item.get_local_id(0) % sg_size;
 
-    // Calculate global warp index
     const int globalWarpIdx = item.get_group(0) * warpsPerBlock + warpId;
     const int total_qk_heads = num_heads_q + num_heads_k;
 
-    // Determine which token and head this warp processes
     const int tokenIdx = globalWarpIdx / total_qk_heads;
     const int localHeadIdx = globalWarpIdx % total_qk_heads;
 
@@ -113,11 +113,9 @@ struct FusedQKNormRopeKernel {
     const int headIdx = isQ ? localHeadIdx : localHeadIdx - num_heads_q;
     const int num_heads = num_heads_q + num_heads_k + num_heads_v;
 
-    // Each warp processes one head, each thread gets multiple elements
-    constexpr int numElemsPerThread = head_dim / 32;  // Assumes sg_size=32
+    constexpr int numElemsPerThread = head_dim / 32;
     accscalar_t elements[numElemsPerThread];
 
-    // Calculate offset for this warp
     int offsetWarp;
     if (isQ) {
       offsetWarp = tokenIdx * num_heads * head_dim + headIdx * head_dim;
@@ -170,13 +168,13 @@ struct FusedQKNormRopeKernel {
           cos_vals[i] = sycl::cos(theta);
         }
       } else {
-        // Neox style
+        // Neox style - use XOR shuffle like CUDA
         sycl::group_barrier(sg);
         const int half_rotary_lanes = rotary_lanes / 2;
 
         for (int i = 0; i < numElemsPerThread; i++) {
-          // Shuffle data within sub-group
-          elements2[i] = sycl::shift_group_right(sg, elements[i], half_rotary_lanes);
+          // XOR shuffle to exchange between first and second half
+          elements2[i] = sycl::permute_group_by_xor(sg, elements[i], half_rotary_lanes);
           if (laneId < half_rotary_lanes) {
             elements2[i] = -elements2[i];
           }
@@ -192,9 +190,9 @@ struct FusedQKNormRopeKernel {
         sycl::group_barrier(sg);
       }
 
+      // Apply rotation with attention_factor
       for (int i = 0; i < numElemsPerThread; i++) {
-        elements[i] =
-            (elements[i] * cos_vals[i] + elements2[i] * sin_vals[i]) * static_cast<accscalar_t>(attention_factor);
+        elements[i] = (elements[i] * cos_vals[i] + elements2[i] * sin_vals[i]) * attention_factor;
       }
     }
 
@@ -204,7 +202,6 @@ struct FusedQKNormRopeKernel {
     }
   }
 };
-
 template <int head_dim, bool interleave, typename scalar_t>
 void launchFusedQKNormRopeImpl(
     void* qkv,
@@ -298,10 +295,10 @@ void fused_qk_norm_rope(
   auto queue = dpcppGetCurrentQueue();
   bool interleave = !is_neox;
 
-#define LAUNCH_KERNEL(HEAD_DIM, INTERLEAVE)                                                          \
+#define LAUNCH_KERNEL(head_dim, interleave)                                                          \
   AT_DISPATCH_FLOATING_TYPES_AND2(                                                                   \
       at::ScalarType::Half, at::ScalarType::BFloat16, qkv.scalar_type(), "fused_qk_norm_rope", [&] { \
-        launchFusedQKNormRopeImpl<HEAD_DIM, INTERLEAVE, scalar_t>(                                   \
+        launchFusedQKNormRopeImpl<head_dim, interleave, scalar_t>(                                   \
             qkv.data_ptr(),                                                                          \
             static_cast<int>(num_tokens),                                                            \
             static_cast<int>(num_heads_q),                                                           \
