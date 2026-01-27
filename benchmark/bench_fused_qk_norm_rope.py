@@ -8,9 +8,10 @@ from sgl_kernel import fused_qk_norm_rope
 
 def torch_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6):
     """Reference RMS normalization implementation."""
-    variance = x.pow(2).mean(-1, keepdim=True)
-    x = x * torch.rsqrt(variance + eps)
-    return weight * x
+    orig_dtype = x.dtype
+    variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
+    x = x.to(torch.float32) * torch.rsqrt(variance + eps)
+    return (weight.to(torch.float32) * x).to(orig_dtype)
 
 
 def apply_rotary_emb(
@@ -31,8 +32,7 @@ def apply_rotary_emb(
         # Interleaved style
         x1 = x[..., ::2]
         x2 = x[..., 1::2]
-        cos = cos[..., ::2]
-        sin = sin[..., ::2]
+        # cos and sin are already half_dim, don't slice again
         rotated = torch.stack(
             [x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1
         ).flatten(-2)
@@ -44,13 +44,14 @@ def compute_rope_freqs(
     max_seq_len: int,
     base: float = 10000.0,
     device: torch.device = None,
+    dtype: torch.dtype = torch.bfloat16,
 ):
     """Compute RoPE frequency tensors."""
     inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device).float() / dim))
     t = torch.arange(max_seq_len, device=device).float()
     freqs = torch.outer(t, inv_freq)
-    cos = freqs.cos()
-    sin = freqs.sin()
+    cos = freqs.cos().to(dtype)
+    sin = freqs.sin().to(dtype)
     return cos, sin
 
 
@@ -89,7 +90,7 @@ def torch_fused_qk_norm_rope(
 
     # Compute RoPE
     max_pos = position_ids.max().item() + 1
-    cos, sin = compute_rope_freqs(rotary_dim, max_pos, base, qkv.device)
+    cos, sin = compute_rope_freqs(rotary_dim, max_pos, base, qkv.device, qkv.dtype)
     cos = cos[position_ids].unsqueeze(1)  # (num_tokens, 1, rotary_dim)
     sin = sin[position_ids].unsqueeze(1)
 
@@ -111,7 +112,7 @@ def torch_fused_qk_norm_rope(
 
     # Concatenate back
     qkv_out = torch.cat([q, k, v], dim=1)
-    return qkv_out.view(num_tokens, -1)
+    return qkv_out.view(num_tokens, -1).to(qkv.dtype)
 
 
 def calculate_diff(
