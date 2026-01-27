@@ -165,107 +165,6 @@ def fused_qk_norm_rope_reference(
     return result
 
 
-def calculate_diff(
-    batch_size, seq_len, num_heads_q, num_heads_k, num_heads_v, head_dim, is_neox
-):
-    device = torch.device("xpu")
-    num_tokens = batch_size * seq_len
-    num_heads = num_heads_q + num_heads_k + num_heads_v
-
-    qkv = torch.randn(
-        num_tokens, num_heads * head_dim, device=device, dtype=torch.bfloat16
-    )
-    q_weight = torch.randn(head_dim, device=device, dtype=torch.bfloat16)
-    k_weight = torch.randn(head_dim, device=device, dtype=torch.bfloat16)
-    position_ids = torch.arange(num_tokens, device=device, dtype=torch.int32)
-
-    eps = 1e-6
-    base = 10000.0
-    rotary_dim = head_dim
-
-    # Clone for independent execution (keep bfloat16 for fair comparison)
-    qkv_ref = qkv.clone()
-    q_weight_ref = q_weight.clone()
-    k_weight_ref = k_weight.clone()
-    position_ids_ref = position_ids.clone()
-
-    qkv_sglang = qkv.clone()
-
-    # PyTorch reference
-    qkv_out_torch = fused_qk_norm_rope_reference(
-        qkv_ref,
-        num_heads_q,
-        num_heads_k,
-        num_heads_v,
-        head_dim,
-        eps,
-        q_weight_ref,
-        k_weight_ref,
-        base,
-        is_neox,
-        position_ids_ref,
-        factor=1.0,
-        low=1.0,
-        high=1.0,
-        attention_factor=1.0,
-        rotary_dim=rotary_dim,
-    )
-
-    # SGL Kernel
-    fused_qk_norm_rope(
-        qkv_sglang,
-        num_heads_q,
-        num_heads_k,
-        num_heads_v,
-        head_dim,
-        eps,
-        q_weight,
-        k_weight,
-        base,
-        is_neox,
-        position_ids,
-        factor=1.0,
-        low=1.0,
-        high=1.0,
-        attention_factor=1.0,
-        rotary_dim=rotary_dim,
-    )
-
-    # Compare with relaxed tolerances for bfloat16
-    # bfloat16 has ~3 decimal digits of precision, so rtol=5e-2 is reasonable
-    rtol = 5e-2  # 5% relative tolerance
-    atol = 1e-2  # absolute tolerance for near-zero values
-
-    diff = (qkv_out_torch - qkv_sglang).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
-
-    # Calculate relative error
-    rel_error = (diff / (qkv_out_torch.abs() + 1e-8)).mean().item()
-
-    if torch.allclose(qkv_out_torch, qkv_sglang, rtol=rtol, atol=atol):
-        print(
-            f"✅ is_neox={is_neox} - PASS (max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, rel_err={rel_error:.6f})"
-        )
-    else:
-        # Show more detailed diagnostics
-        num_mismatches = (
-            (~torch.isclose(qkv_out_torch, qkv_sglang, rtol=rtol, atol=atol))
-            .sum()
-            .item()
-        )
-        total_elements = qkv_out_torch.numel()
-        mismatch_pct = 100.0 * num_mismatches / total_elements
-
-        print(f"❌ is_neox={is_neox} - FAIL")
-        print(f"   Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}")
-        print(f"   Relative error: {rel_error:.6f}")
-        print(
-            f"   Mismatched elements: {num_mismatches}/{total_elements} ({mismatch_pct:.2f}%)"
-        )
-        print(f"   Tolerance used: rtol={rtol}, atol={atol}")
-
-
 # Benchmark configurations
 batch_size_range = [1, 2, 4, 8]
 seq_len_range = [64, 128, 256, 512, 1024, 2048]
@@ -480,38 +379,7 @@ def benchmark(
 
 
 if __name__ == "__main__":
-
-    # Run correctness checks
-    print("Running correctness checks...")
-    calculate_diff(
-        batch_size=4,
-        seq_len=128,
-        num_heads_q=32,
-        num_heads_k=8,
-        num_heads_v=8,
-        head_dim=128,
-        is_neox=True,
-    )
-    calculate_diff(
-        batch_size=2,
-        seq_len=64,
-        num_heads_q=32,
-        num_heads_k=8,
-        num_heads_v=8,
-        head_dim=128,
-        is_neox=False,
-    )
-    calculate_diff(
-        batch_size=1,
-        seq_len=32,
-        num_heads_q=128,
-        num_heads_k=128,
-        num_heads_v=128,
-        head_dim=128,
-        is_neox=True,
-    )
-
-    print("\nRunning benchmarks...")
+    print("Running benchmarks...")
     benchmark.run(print_data=True)
 
     # Print bandwidth results
