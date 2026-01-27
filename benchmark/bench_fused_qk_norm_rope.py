@@ -6,56 +6,91 @@ import triton
 from sgl_kernel import fused_qk_norm_rope
 
 
-def torch_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6):
-    """Reference RMS normalization implementation."""
+def llama_rms_norm(x, w, eps=1e-6):
+    """PyTorch reference implementation of RMS normalization."""
     orig_dtype = x.dtype
-    variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
-    x = x.to(torch.float32) * torch.rsqrt(variance + eps)
-    return (weight.to(torch.float32) * x).to(orig_dtype)
+    x = x.float()
+    variance = x.pow(2).mean(dim=-1, keepdim=True)
+    x = x * torch.rsqrt(variance + eps)
+    x = x * w.float()
+    x = x.to(orig_dtype)
+    return x
 
 
-def apply_rotary_emb(
+def apply_rotary_emb_native(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    is_neox: bool = True,
-):
-    """Reference rotary position embedding implementation."""
-    if is_neox:
-        # Neox style: split into two halves
-        half_dim = x.shape[-1] // 2
-        x1, x2 = x[..., :half_dim], x[..., half_dim:]
-        cos = cos[..., :half_dim]
-        sin = sin[..., :half_dim]
-        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    is_neox_style: bool,
+) -> torch.Tensor:
+    """
+    Native PyTorch rotary embedding implementation.
+    Args:
+        x: [num_tokens, num_heads, head_size]
+        cos: [num_tokens, rotary_dim // 2]
+        sin: [num_tokens, rotary_dim // 2]
+        is_neox_style: Whether to use Neox-style or interleaved style
+    """
+    cos = cos.unsqueeze(-2).to(x.dtype)
+    sin = sin.unsqueeze(-2).to(x.dtype)
+
+    if is_neox_style:
+        # Neox style: split in half along head dimension
+        x1, x2 = torch.chunk(x, 2, dim=-1)
     else:
-        # Interleaved style
+        # Interleaved style: even and odd indices
         x1 = x[..., ::2]
         x2 = x[..., 1::2]
-        # cos and sin are already half_dim, don't slice again
-        rotated = torch.stack(
-            [x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1
-        ).flatten(-2)
-        return rotated
+
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+
+    if is_neox_style:
+        return torch.cat((o1, o2), dim=-1)
+    else:
+        return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 
-def compute_rope_freqs(
-    dim: int,
-    max_seq_len: int,
-    base: float = 10000.0,
-    device: torch.device = None,
-    dtype: torch.dtype = torch.bfloat16,
+def compute_inv_freq_yarn(
+    head_dim: int,
+    rotary_dim: int,
+    base: float,
+    factor: float,
+    low_freq_factor: float,
+    high_freq_factor: float,
+    device: torch.device,
 ):
-    """Compute RoPE frequency tensors."""
-    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device).float() / dim))
-    t = torch.arange(max_seq_len, device=device).float()
-    freqs = torch.outer(t, inv_freq)
-    cos = freqs.cos().to(dtype)
-    sin = freqs.sin().to(dtype)
-    return cos, sin
+    """Compute inverse frequencies for YARN RoPE."""
+    inv_freq = 1.0 / (
+        base
+        ** (
+            torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
+            / rotary_dim
+        )
+    )
+
+    if factor != 1.0:
+        # YARN scaling
+        dim_range = torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
+
+        # Compute linear interpolation factor
+        linear_func = (dim_range - low_freq_factor) / (
+            high_freq_factor - low_freq_factor
+        )
+        ramp_func = torch.clamp(linear_func, 0.0, 1.0)
+
+        inv_freq_extrapolation = inv_freq
+        inv_freq_interpolation = inv_freq / factor
+
+        inv_freq = (
+            inv_freq_interpolation * (1.0 - ramp_func)
+            + inv_freq_extrapolation * ramp_func
+        )
+
+    return inv_freq
 
 
-def torch_fused_qk_norm_rope(
+def fused_qk_norm_rope_reference(
     qkv: torch.Tensor,
     num_heads_q: int,
     num_heads_k: int,
@@ -67,52 +102,67 @@ def torch_fused_qk_norm_rope(
     base: float,
     is_neox: bool,
     position_ids: torch.Tensor,
+    factor: float = 1.0,
+    low: float = 1.0,
+    high: float = 1.0,
+    attention_factor: float = 1.0,
     rotary_dim: int = None,
-):
-    """Reference PyTorch implementation of fused QK norm and RoPE."""
-    num_tokens = qkv.shape[0]
-    num_heads = num_heads_q + num_heads_k + num_heads_v
+) -> torch.Tensor:
+    """
+    Reference implementation in PyTorch for testing.
 
+    Args:
+        qkv: [num_tokens, (num_heads_q + num_heads_k + num_heads_v) * head_dim]
+        Other args match the kernel interface
+    """
     if rotary_dim is None:
         rotary_dim = head_dim
 
-    # Reshape to separate heads
-    qkv = qkv.view(num_tokens, num_heads, head_dim)
+    num_tokens = qkv.shape[0]
+    total_heads = num_heads_q + num_heads_k + num_heads_v
 
-    # Split Q, K, V
-    q = qkv[:, :num_heads_q, :]
-    k = qkv[:, num_heads_q : num_heads_q + num_heads_k, :]
-    v = qkv[:, num_heads_q + num_heads_k :, :]
+    # Reshape QKV to separate Q, K, V
+    qkv_reshaped = qkv.view(num_tokens, total_heads, head_dim)
 
-    # Apply RMS normalization
-    q = torch_rms_norm(q, q_weight, eps)
-    k = torch_rms_norm(k, k_weight, eps)
+    q = qkv_reshaped[:, :num_heads_q, :]
+    k = qkv_reshaped[:, num_heads_q : num_heads_q + num_heads_k, :]
+    v = qkv_reshaped[:, num_heads_q + num_heads_k :, :]
 
-    # Compute RoPE
-    max_pos = position_ids.max().item() + 1
-    cos, sin = compute_rope_freqs(rotary_dim, max_pos, base, qkv.device, qkv.dtype)
-    cos = cos[position_ids].unsqueeze(1)  # (num_tokens, 1, rotary_dim)
-    sin = sin[position_ids].unsqueeze(1)
+    # Apply RMSNorm to Q and K
+    q_normalized = llama_rms_norm(q, q_weight, eps)
+    k_normalized = llama_rms_norm(k, k_weight, eps)
 
-    # Apply RoPE to Q and K
-    if rotary_dim < head_dim:
-        q_rot = q[..., :rotary_dim]
-        q_pass = q[..., rotary_dim:]
-        k_rot = k[..., :rotary_dim]
-        k_pass = k[..., rotary_dim:]
+    # Compute RoPE frequencies
+    inv_freq = compute_inv_freq_yarn(
+        head_dim, rotary_dim, base, factor, low, high, qkv.device
+    )
 
-        q_rot = apply_rotary_emb(q_rot, cos, sin, is_neox)
-        k_rot = apply_rotary_emb(k_rot, cos, sin, is_neox)
+    # Compute cos and sin for each position
+    positions = position_ids.to(torch.float32)
+    freqs = torch.outer(positions, inv_freq)
+    cos = freqs.cos()
+    sin = freqs.sin()
 
-        q = torch.cat([q_rot, q_pass], dim=-1)
-        k = torch.cat([k_rot, k_pass], dim=-1)
-    else:
-        q = apply_rotary_emb(q, cos, sin, is_neox)
-        k = apply_rotary_emb(k, cos, sin, is_neox)
+    # Apply attention factor
+    cos = cos * attention_factor
+    sin = sin * attention_factor
 
-    # Concatenate back
-    qkv_out = torch.cat([q, k, v], dim=1)
-    return qkv_out.view(num_tokens, -1).to(qkv.dtype)
+    # Apply RoPE to Q and K (only to rotary_dim portion)
+    q_rot = q_normalized[..., :rotary_dim]
+    q_pass = q_normalized[..., rotary_dim:]
+    q_rot = apply_rotary_emb_native(q_rot, cos, sin, is_neox)
+    q_final = torch.cat([q_rot, q_pass], dim=-1)
+
+    k_rot = k_normalized[..., :rotary_dim]
+    k_pass = k_normalized[..., rotary_dim:]
+    k_rot = apply_rotary_emb_native(k_rot, cos, sin, is_neox)
+    k_final = torch.cat([k_rot, k_pass], dim=-1)
+
+    # Concatenate Q, K, V back together
+    result = torch.cat([q_final, k_final, v], dim=1)
+    result = result.view(num_tokens, total_heads * head_dim)
+
+    return result
 
 
 def calculate_diff(
@@ -138,7 +188,7 @@ def calculate_diff(
     qkv_sglang = qkv.clone()
 
     # PyTorch reference
-    qkv_out_torch = torch_fused_qk_norm_rope(
+    qkv_out_torch = fused_qk_norm_rope_reference(
         qkv_torch,
         num_heads_q,
         num_heads_k,
@@ -150,7 +200,11 @@ def calculate_diff(
         base,
         is_neox,
         position_ids,
-        rotary_dim,
+        factor=1.0,
+        low=1.0,
+        high=1.0,
+        attention_factor=1.0,
+        rotary_dim=rotary_dim,
     )
 
     # SGL Kernel
@@ -323,7 +377,7 @@ def benchmark(
     quantiles = [0.5, 0.2, 0.8]
 
     if provider == "torch":
-        fn = lambda: torch_fused_qk_norm_rope(
+        fn = lambda: fused_qk_norm_rope_reference(
             qkv.clone(),
             num_heads_q,
             num_heads_k,
@@ -335,7 +389,11 @@ def benchmark(
             base,
             is_neox,
             position_ids,
-            rotary_dim,
+            factor=1.0,
+            low=1.0,
+            high=1.0,
+            attention_factor=1.0,
+            rotary_dim=rotary_dim,
         )
     elif provider == "sglang":
         fn = lambda: fused_qk_norm_rope(
