@@ -184,28 +184,33 @@ def calculate_diff(
     rotary_dim = head_dim
 
     # Clone for independent execution
-    qkv_torch = qkv.clone()
+    # Convert to float32 for reference (higher precision)
+    qkv_ref = qkv.clone().float()
+    q_weight_ref = q_weight.clone().float()
+    k_weight_ref = k_weight.clone().float()
+    position_ids_ref = position_ids.clone()
+
     qkv_sglang = qkv.clone()
 
     # PyTorch reference
     qkv_out_torch = fused_qk_norm_rope_reference(
-        qkv_torch,
+        qkv_ref,
         num_heads_q,
         num_heads_k,
         num_heads_v,
         head_dim,
         eps,
-        q_weight,
-        k_weight,
+        q_weight_ref,
+        k_weight_ref,
         base,
         is_neox,
-        position_ids,
+        position_ids_ref,
         factor=1.0,
         low=1.0,
         high=1.0,
         attention_factor=1.0,
         rotary_dim=rotary_dim,
-    )
+    ).to(torch.bfloat16)
 
     # SGL Kernel
     fused_qk_norm_rope(
@@ -239,7 +244,7 @@ def calculate_diff(
 
 
 # Benchmark configurations
-batch_size_range = [1, 2, 4, 8, 16, 32]
+batch_size_range = [1, 2, 4, 8]
 seq_len_range = [64, 128, 256, 512, 1024, 2048]
 # DeepSeek-V3 config: 128 Q heads, 128 KV heads (MLA)
 head_config_range = [
