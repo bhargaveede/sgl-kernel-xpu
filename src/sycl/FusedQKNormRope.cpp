@@ -1,9 +1,9 @@
 #include <ATen/ATen.h>
 #include <ATen/OpMathType.h>
 #include <ATen/Parallel.h>
-#include <c10/xpu/XPUStream.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Float8_e5m2.h>
+#include <c10/xpu/XPUStream.h>
 #include <torch/all.h>
 
 #include <cmath>
@@ -113,7 +113,8 @@ struct FusedQKNormRopeKernel {
     accscalar_t sumOfSquares = 0.0f;
     for (int i = 0; i < numElemsPerThread; i++) {
       // Handle FP8 types using CUTLASS emulation
-      if constexpr (std::is_same_v<scalar_t, cutlass::float_e4m3_t> || std::is_same_v<scalar_t, cutlass::float_e5m2_t>) {
+      if constexpr (
+          std::is_same_v<scalar_t, cutlass::float_e4m3_t> || std::is_same_v<scalar_t, cutlass::float_e5m2_t>) {
         // Convert FP8 to float for computation
         elements[i] = static_cast<accscalar_t>(static_cast<float>(qkv[offsetThread + i]));
       } else {
@@ -134,7 +135,8 @@ struct FusedQKNormRopeKernel {
     for (int i = 0; i < numElemsPerThread; i++) {
       int dim = laneId * numElemsPerThread + i;
       accscalar_t weight;
-      if constexpr (std::is_same_v<scalar_t, cutlass::float_e4m3_t> || std::is_same_v<scalar_t, cutlass::float_e5m2_t>) {
+      if constexpr (
+          std::is_same_v<scalar_t, cutlass::float_e4m3_t> || std::is_same_v<scalar_t, cutlass::float_e5m2_t>) {
         // Convert FP8 weight to float
         const scalar_t* weight_ptr = isQ ? q_weight : k_weight;
         weight = static_cast<accscalar_t>(static_cast<float>(weight_ptr[dim]));
@@ -197,7 +199,8 @@ struct FusedQKNormRopeKernel {
     // Store results
     for (int i = 0; i < numElemsPerThread; i++) {
       // Handle FP8 types using CUTLASS emulation
-      if constexpr (std::is_same_v<scalar_t, cutlass::float_e4m3_t> || std::is_same_v<scalar_t, cutlass::float_e5m2_t>) {
+      if constexpr (
+          std::is_same_v<scalar_t, cutlass::float_e4m3_t> || std::is_same_v<scalar_t, cutlass::float_e5m2_t>) {
         // Convert float to FP8
         qkv[offsetThread + i] = static_cast<scalar_t>(static_cast<float>(elements[i]));
       } else {
@@ -299,89 +302,85 @@ void fused_qk_norm_rope(
   auto queue = dpcppGetCurrentQueue();
   bool interleave = !is_neox;
 
-#define LAUNCH_KERNEL(head_dim, interleave)                                                          \
-  AT_DISPATCH_FLOATING_TYPES_AND(                                                                    \
-      at::ScalarType::Half,                                                                          \
-      qkv.scalar_type(),                                                                             \
-      "fused_qk_norm_rope",                                                                          \
-      [&] {                                                                                          \
-        launchFusedQKNormRopeImpl<head_dim, interleave, scalar_t>(                                   \
-            qkv.data_ptr(),                                                                          \
-            static_cast<int>(num_tokens),                                                            \
-            static_cast<int>(num_heads_q),                                                           \
-            static_cast<int>(num_heads_k),                                                           \
-            static_cast<int>(num_heads_v),                                                           \
-            static_cast<float>(eps),                                                                 \
-            q_weight.data_ptr(),                                                                     \
-            k_weight.data_ptr(),                                                                     \
-            static_cast<float>(base),                                                                \
-            position_ids.data_ptr<int>(),                                                            \
-            static_cast<float>(factor),                                                              \
-            static_cast<float>(low),                                                                 \
-            static_cast<float>(high),                                                                \
-            static_cast<float>(attention_factor),                                                    \
-            static_cast<int>(rotary_dim),                                                            \
-            queue);                                                                                  \
-      },                                                                                             \
-      AT_DISPATCH_CASE(at::ScalarType::BFloat16, [&] {                                               \
-        launchFusedQKNormRopeImpl<head_dim, interleave, scalar_t>(                                   \
-            qkv.data_ptr(),                                                                          \
-            static_cast<int>(num_tokens),                                                            \
-            static_cast<int>(num_heads_q),                                                           \
-            static_cast<int>(num_heads_k),                                                           \
-            static_cast<int>(num_heads_v),                                                           \
-            static_cast<float>(eps),                                                                 \
-            q_weight.data_ptr(),                                                                     \
-            k_weight.data_ptr(),                                                                     \
-            static_cast<float>(base),                                                                \
-            position_ids.data_ptr<int>(),                                                            \
-            static_cast<float>(factor),                                                              \
-            static_cast<float>(low),                                                                 \
-            static_cast<float>(high),                                                                \
-            static_cast<float>(attention_factor),                                                    \
-            static_cast<int>(rotary_dim),                                                            \
-            queue);                                                                                  \
-      })                                                                                             \
-      AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, [&] {                                          \
-        using fp8_t = cutlass::float_e4m3_t;                                                         \
-        launchFusedQKNormRopeImpl<head_dim, interleave, fp8_t>(                                      \
-            qkv.data_ptr(),                                                                          \
-            static_cast<int>(num_tokens),                                                            \
-            static_cast<int>(num_heads_q),                                                           \
-            static_cast<int>(num_heads_k),                                                           \
-            static_cast<int>(num_heads_v),                                                           \
-            static_cast<float>(eps),                                                                 \
-            q_weight.data_ptr(),                                                                     \
-            k_weight.data_ptr(),                                                                     \
-            static_cast<float>(base),                                                                \
-            position_ids.data_ptr<int>(),                                                            \
-            static_cast<float>(factor),                                                              \
-            static_cast<float>(low),                                                                 \
-            static_cast<float>(high),                                                                \
-            static_cast<float>(attention_factor),                                                    \
-            static_cast<int>(rotary_dim),                                                            \
-            queue);                                                                                  \
-      })                                                                                             \
-      AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, [&] {                                            \
-        using fp8_t = cutlass::float_e5m2_t;                                                         \
-        launchFusedQKNormRopeImpl<head_dim, interleave, fp8_t>(                                      \
-            qkv.data_ptr(),                                                                          \
-            static_cast<int>(num_tokens),                                                            \
-            static_cast<int>(num_heads_q),                                                           \
-            static_cast<int>(num_heads_k),                                                           \
-            static_cast<int>(num_heads_v),                                                           \
-            static_cast<float>(eps),                                                                 \
-            q_weight.data_ptr(),                                                                     \
-            k_weight.data_ptr(),                                                                     \
-            static_cast<float>(base),                                                                \
-            position_ids.data_ptr<int>(),                                                            \
-            static_cast<float>(factor),                                                              \
-            static_cast<float>(low),                                                                 \
-            static_cast<float>(high),                                                                \
-            static_cast<float>(attention_factor),                                                    \
-            static_cast<int>(rotary_dim),                                                            \
-            queue);                                                                                  \
-      }))
+#define LAUNCH_KERNEL(head_dim, interleave)                                         \
+  do {                                                                              \
+    auto dtype = qkv.scalar_type();                                                 \
+    if (dtype == at::ScalarType::Half) {                                            \
+      launchFusedQKNormRopeImpl<head_dim, interleave, sycl::half>(                  \
+          qkv.data_ptr(),                                                           \
+          static_cast<int>(num_tokens),                                             \
+          static_cast<int>(num_heads_q),                                            \
+          static_cast<int>(num_heads_k),                                            \
+          static_cast<int>(num_heads_v),                                            \
+          static_cast<float>(eps),                                                  \
+          q_weight.data_ptr(),                                                      \
+          k_weight.data_ptr(),                                                      \
+          static_cast<float>(base),                                                 \
+          position_ids.data_ptr<int>(),                                             \
+          static_cast<float>(factor),                                               \
+          static_cast<float>(low),                                                  \
+          static_cast<float>(high),                                                 \
+          static_cast<float>(attention_factor),                                     \
+          static_cast<int>(rotary_dim),                                             \
+          queue);                                                                   \
+    } else if (dtype == at::ScalarType::BFloat16) {                                 \
+      launchFusedQKNormRopeImpl<head_dim, interleave, sycl::ext::oneapi::bfloat16>( \
+          qkv.data_ptr(),                                                           \
+          static_cast<int>(num_tokens),                                             \
+          static_cast<int>(num_heads_q),                                            \
+          static_cast<int>(num_heads_k),                                            \
+          static_cast<int>(num_heads_v),                                            \
+          static_cast<float>(eps),                                                  \
+          q_weight.data_ptr(),                                                      \
+          k_weight.data_ptr(),                                                      \
+          static_cast<float>(base),                                                 \
+          position_ids.data_ptr<int>(),                                             \
+          static_cast<float>(factor),                                               \
+          static_cast<float>(low),                                                  \
+          static_cast<float>(high),                                                 \
+          static_cast<float>(attention_factor),                                     \
+          static_cast<int>(rotary_dim),                                             \
+          queue);                                                                   \
+    } else if (dtype == at::ScalarType::Float8_e4m3fn) {                            \
+      launchFusedQKNormRopeImpl<head_dim, interleave, cutlass::float_e4m3_t>(       \
+          qkv.data_ptr(),                                                           \
+          static_cast<int>(num_tokens),                                             \
+          static_cast<int>(num_heads_q),                                            \
+          static_cast<int>(num_heads_k),                                            \
+          static_cast<int>(num_heads_v),                                            \
+          static_cast<float>(eps),                                                  \
+          q_weight.data_ptr(),                                                      \
+          k_weight.data_ptr(),                                                      \
+          static_cast<float>(base),                                                 \
+          position_ids.data_ptr<int>(),                                             \
+          static_cast<float>(factor),                                               \
+          static_cast<float>(low),                                                  \
+          static_cast<float>(high),                                                 \
+          static_cast<float>(attention_factor),                                     \
+          static_cast<int>(rotary_dim),                                             \
+          queue);                                                                   \
+    } else if (dtype == at::ScalarType::Float8_e5m2) {                              \
+      launchFusedQKNormRopeImpl<head_dim, interleave, cutlass::float_e5m2_t>(       \
+          qkv.data_ptr(),                                                           \
+          static_cast<int>(num_tokens),                                             \
+          static_cast<int>(num_heads_q),                                            \
+          static_cast<int>(num_heads_k),                                            \
+          static_cast<int>(num_heads_v),                                            \
+          static_cast<float>(eps),                                                  \
+          q_weight.data_ptr(),                                                      \
+          k_weight.data_ptr(),                                                      \
+          static_cast<float>(base),                                                 \
+          position_ids.data_ptr<int>(),                                             \
+          static_cast<float>(factor),                                               \
+          static_cast<float>(low),                                                  \
+          static_cast<float>(high),                                                 \
+          static_cast<float>(attention_factor),                                     \
+          static_cast<int>(rotary_dim),                                             \
+          queue);                                                                   \
+    } else {                                                                        \
+      TORCH_CHECK(false, "Unsupported dtype for fused_qk_norm_rope: ", dtype);      \
+    }                                                                               \
+  } while (0)
 
   switch (head_dim) {
     case 64:
